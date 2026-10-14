@@ -32,6 +32,15 @@ from .overlay import (
     verify,
 )
 from .pipeline import run_extraction
+from .evaluation import (
+    cursor_judge,
+    judge_outcomes,
+    render_summary,
+    replay,
+    sample_prompts,
+    spot_check_markdown,
+    summarize,
+)
 from .report import generate_report, never_retrieved, render_report
 from .retrieval import RetrievalScope
 from .retrieval import purge_traces
@@ -199,6 +208,16 @@ def parser() -> argparse.ArgumentParser:
     search_cmd.add_argument("query")
     _add_storage_args(search_cmd)
     _add_scope_args(search_cmd)
+    eval_cmd = commands.add_parser("eval", help="Replay real past prompts through retrieval and judge the results")
+    _add_storage_args(eval_cmd)
+    eval_cmd.add_argument("--samples", type=int, default=150)
+    eval_cmd.add_argument("--seed", type=int, default=1)
+    eval_cmd.add_argument("--workers", type=int, default=4)
+    eval_cmd.add_argument("--max-results", type=int, default=3)
+    eval_cmd.add_argument("--no-judge", action="store_true", help="Gate statistics only; no Cursor calls")
+    eval_cmd.add_argument("--spot-check", type=int, default=20, help="Pairs to write for hand-checking the judge")
+    eval_cmd.add_argument("--claude-projects", type=Path, default=Path.home() / ".claude" / "projects")
+    eval_cmd.add_argument("--out", type=Path, help="Output directory (default: <artifacts>/../eval)")
     hook = commands.add_parser("hook")
     _add_storage_args(hook)
     _add_scope_args(hook)
@@ -407,7 +426,7 @@ def run(
         artifacts = _require(resolved.artifacts, "artifacts")
         database = (
             _require(resolved.database, "database")
-            if args.command in {"ingest", "search", "hook", "forget", "capture", "import-sessions"}
+            if args.command in {"ingest", "search", "hook", "forget", "capture", "import-sessions", "eval"}
             else resolved.database
         )
     except ConfigError as error:
@@ -895,6 +914,23 @@ def run(
             print(f"error: {error}", file=sys.stderr)
             return 1
         print(f"{verb} {args.record_id}")
+    elif args.command == "eval":
+        out_dir = args.out or artifacts.parent / "eval"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        prompts = sample_prompts(args.claude_projects, n=args.samples, seed=args.seed)
+        outcomes = replay(prompts, database, artifacts, embedder or FastEmbedder(), max_results=args.max_results)
+        if not args.no_judge:
+            judge_outcomes(
+                outcomes,
+                cursor_judge(model=resolved.cursor_model, mode=resolved.cursor_mode),
+                out_dir / "judgments.json",
+                workers=args.workers,
+            )
+            (out_dir / "spot-check.md").write_text(spot_check_markdown(outcomes, count=args.spot_check, seed=args.seed))
+        summary = summarize(outcomes)
+        (out_dir / "results.json").write_text(json.dumps({"summary": summary, "outcomes": outcomes}, indent=2))
+        print(render_summary(summary))
+        print(f"\nWrote {out_dir}/results.json" + ("" if args.no_judge else f" and {out_dir}/spot-check.md"))
     elif args.command == "report":
         data = generate_report(artifacts)
         if args.never_retrieved_days != 14:
