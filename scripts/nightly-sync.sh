@@ -102,7 +102,16 @@ count_problems() {
 
 log "=== nightly sync starting ==="
 
-sessions_claude=$(run_step "import Claude sessions (all projects)" "$MEMENTO" import-sessions --source claude --all-projects)
+# Optional: limit Claude discovery to sessions updated in the last N days.
+# Set MEMENTO_SYNC_SINCE_DAYS while backfilling newly discovered projects
+# (MEMENTO_PROJECT_ROOTS / [discovery] roots) in stages; unset it to widen.
+SINCE_ARGS=""
+if [ -n "${MEMENTO_SYNC_SINCE_DAYS:-}" ]; then
+  SINCE_ARGS="--since $(date -v-"${MEMENTO_SYNC_SINCE_DAYS}"d +%Y-%m-%d)"
+fi
+
+# shellcheck disable=SC2086 # SINCE_ARGS is intentionally word-split.
+sessions_claude=$(run_step "import Claude sessions (all projects)" "$MEMENTO" import-sessions --source claude --all-projects $SINCE_ARGS)
 log_sync_run "claude_sessions" "$sessions_claude"
 sessions_cursor=$(run_step "import Cursor conversations" "$MEMENTO" import-sessions --source cursor)
 log_sync_run "cursor_sessions" "$sessions_cursor"

@@ -2148,3 +2148,25 @@ def test_health_check_treats_a_changed_session_revision_as_unprocessed(tmp_path,
 
     findings = json.loads(capsys.readouterr().out)["findings"]
     assert any(finding["category"] == "unprocessed_source" for finding in findings)
+
+
+def test_claude_sessions_include_worktree_and_claude_worktree_transcripts(tmp_path):
+    from memento.app_config import ProjectSettings
+    from memento.session_sources import claude_sessions
+
+    root, worktree = tmp_path / "alpha", tmp_path / "alpha-wt"
+    root.mkdir(), worktree.mkdir()
+    projects_dir = tmp_path / "claude" / "projects"
+
+    def encode(path):
+        return re.sub(r"[^A-Za-z0-9_-]", "-", str(path.resolve()))
+
+    for directory in (encode(root), encode(worktree), encode(root) + "--claude-worktrees-fix", encode(tmp_path / "other")):
+        (projects_dir / directory).mkdir(parents=True)
+        (projects_dir / directory / f"{directory[-6:]}.jsonl").write_text("{}\n")
+
+    sources = claude_sessions({"alpha": ProjectSettings(root=root, worktrees=(worktree,))}, tmp_path / "claude")
+
+    assert len(sources) == 3
+    assert {source.project_id for source in sources} == {"alpha"}
+    assert {source.project_root for source in sources} == {root, worktree}

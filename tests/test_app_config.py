@@ -188,3 +188,118 @@ def test_add_project_rejects_conflicting_id_or_root(tmp_path):
         add_project(config_path, second, "service")
     with pytest.raises(ConfigError, match="already registered as"):
         add_project(config_path, first, "another-name")
+
+
+def _git_repo(path: Path) -> Path:
+    (path / ".git").mkdir(parents=True)
+    return path
+
+
+def _git_worktree(path: Path, main: Path, name: str) -> Path:
+    gitdir = main / ".git" / "worktrees" / name
+    gitdir.mkdir(parents=True)
+    path.mkdir(parents=True)
+    (path / ".git").write_text(f"gitdir: {gitdir}\n")
+    return path
+
+
+def _discovering_config(tmp_path: Path, root: Path, extra: str = "") -> Path:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(f'[discovery]\nroots = ["{root}"]\n{extra}')
+    return config_path
+
+
+def test_discovery_registers_git_repos_and_skips_non_repos(tmp_path):
+    root = tmp_path / "work"
+    _git_repo(root / "alpha")
+    _git_repo(root / "beta")
+    (root / "coverage").mkdir()
+
+    config = load_app_config(_discovering_config(tmp_path, root))
+
+    assert set(config.projects) == {"alpha", "beta"}
+    assert config.projects["alpha"].discovered
+    assert config.projects["alpha"].root == (root / "alpha").resolve()
+
+
+def test_discovery_folds_worktrees_into_the_main_project(tmp_path):
+    root = tmp_path / "work"
+    main = _git_repo(root / "alpha")
+    inline = _git_worktree(root / "alpha-JET-1", main, "alpha-JET-1")
+    nested = _git_worktree(root / "alpha-worktrees" / "feature", main, "feature")
+    _git_worktree(root / "orphan-wt", tmp_path / "elsewhere", "orphan-wt")
+
+    config = load_app_config(_discovering_config(tmp_path, root))
+
+    assert set(config.projects) == {"alpha"}
+    assert set(config.projects["alpha"].worktrees) == {inline.resolve(), nested.resolve()}
+
+
+def test_explicit_project_wins_and_receives_worktrees(tmp_path):
+    root = tmp_path / "work"
+    main = _git_repo(root / "alpha")
+    worktree = _git_worktree(root / "alpha-wt", main, "alpha-wt")
+    _git_repo(root / "other")
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[discovery]\nroots = ["{root}"]\n\n[projects.renamed]\nroot = "{main}"\nknowledge_base = "/kb"\n'
+    )
+
+    config = load_app_config(config_path)
+
+    assert set(config.projects) == {"renamed", "other"}
+    assert not config.projects["renamed"].discovered
+    assert config.projects["renamed"].knowledge_base == Path("/kb")
+    assert config.projects["renamed"].worktrees == (worktree.resolve(),)
+
+
+def test_discovery_exclude_filters_only_discovered_projects(tmp_path):
+    root = tmp_path / "work"
+    _git_repo(root / "alpha")
+    _git_repo(root / "secret")
+    explicit = _git_repo(root / "kept")
+    config_path = _discovering_config(
+        tmp_path, root, f'exclude = ["secret", "kept"]\n\n[projects.kept]\nroot = "{explicit}"\n'
+    )
+
+    config = load_app_config(config_path)
+
+    assert set(config.projects) == {"alpha", "kept"}
+
+
+def test_discovery_env_overrides_toml_and_works_without_a_config_file(tmp_path, monkeypatch):
+    toml_root, env_root = tmp_path / "toml", tmp_path / "env"
+    _git_repo(toml_root / "from-toml")
+    _git_repo(env_root / "from-env")
+    _git_repo(env_root / "skipped")
+    monkeypatch.setenv("MEMENTO_PROJECT_ROOTS", str(env_root))
+    monkeypatch.setenv("MEMENTO_PROJECT_EXCLUDE", "skipped")
+
+    with_toml = load_app_config(_discovering_config(tmp_path, toml_root))
+    without_file = load_app_config(
+        environ={"MEMENTO_CONFIG": str(tmp_path / "missing.toml"), "MEMENTO_PROJECT_ROOTS": str(env_root)}
+    )
+
+    assert set(with_toml.projects) == {"from-env"}
+    assert set(without_file.projects) == {"from-env", "skipped"}
+
+
+def test_cwd_inside_a_worktree_resolves_to_the_main_project(tmp_path):
+    root = tmp_path / "work"
+    main = _git_repo(root / "alpha")
+    worktree = _git_worktree(root / "alpha-wt", main, "alpha-wt")
+    config = load_app_config(_discovering_config(tmp_path, root))
+
+    resolved = resolve_app_config(config, cwd=worktree)
+
+    assert resolved.project_id == "alpha"
+
+
+def test_add_project_ignores_discovered_projects(tmp_path):
+    root = tmp_path / "work"
+    repo = _git_repo(root / "alpha")
+    config_path = _discovering_config(tmp_path, root)
+
+    identifier, _, created = add_project(config_path, repo, "alpha-pinned")
+
+    assert (identifier, created) == ("alpha-pinned", True)
