@@ -5,7 +5,7 @@ import json
 import re
 import tempfile
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Mapping
 
@@ -31,6 +31,19 @@ class ExtractorSettings:
 class ProjectSettings:
     root: Path
     knowledge_base: Path | None = None
+    # Git worktrees of `root`: their sessions and working directories belong to
+    # this project rather than becoming separate ones.
+    worktrees: tuple[Path, ...] = ()
+    discovered: bool = False
+
+
+@dataclass(frozen=True)
+class DiscoverySettings:
+    """Directories whose Git repositories are registered implicitly. Explicit
+    `[projects.*]` tables always win; `exclude` holds repo directory names."""
+
+    roots: tuple[Path, ...] = ()
+    exclude: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -41,6 +54,7 @@ class AppConfig:
     database: Path | None = None
     extractor: ExtractorSettings = field(default_factory=ExtractorSettings)
     projects: dict[str, ProjectSettings] = field(default_factory=dict)
+    discovery: DiscoverySettings = field(default_factory=DiscoverySettings)
 
 
 @dataclass(frozen=True)
@@ -101,7 +115,42 @@ def _integer(value: object, *, field_name: str, default: int) -> int:
     return value
 
 
-def load_app_config(path: Path | None = None, *, environ: Mapping[str, str] | None = None) -> AppConfig:
+def load_app_config(
+    path: Path | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+    include_discovered: bool = True,
+) -> AppConfig:
+    config = _load_explicit_config(path, environ=environ)
+    if not include_discovered:
+        return config
+    env = environ if environ is not None else os.environ
+    discovery = _discovery_settings(config.discovery, env)
+    if not discovery.roots:
+        return config
+    projects = discover_projects(discovery, config.projects)
+    return replace(config, projects=projects, discovery=discovery)
+
+
+def _discovery_settings(configured: DiscoverySettings, env: Mapping[str, str]) -> DiscoverySettings:
+    """Env vars replace the TOML values (CLI > env > TOML)."""
+
+    roots_env = _env(env, "PROJECT_ROOTS")
+    exclude_env = _env(env, "PROJECT_EXCLUDE")
+    roots = (
+        tuple(Path(entry).expanduser() for entry in roots_env.split(os.pathsep) if entry.strip())
+        if roots_env is not None
+        else configured.roots
+    )
+    exclude = (
+        frozenset(name.strip() for name in re.split(rf"[,{re.escape(os.pathsep)}]", exclude_env) if name.strip())
+        if exclude_env is not None
+        else configured.exclude
+    )
+    return DiscoverySettings(roots=roots, exclude=exclude)
+
+
+def _load_explicit_config(path: Path | None, *, environ: Mapping[str, str] | None) -> AppConfig:
     explicit_path = path is not None
     selected_path = path.expanduser() if path is not None else default_config_path(environ)
     env = environ if environ is not None else os.environ
@@ -155,6 +204,14 @@ def load_app_config(path: Path | None = None, *, environ: Mapping[str, str] | No
             ),
         )
 
+    discovery_raw = raw.get("discovery", {})
+    if not isinstance(discovery_raw, dict):
+        raise ConfigError("discovery must be a TOML table")
+    discovery = DiscoverySettings(
+        roots=tuple(_string_list(discovery_raw.get("roots"), field_name="discovery.roots", path=True)),
+        exclude=frozenset(_string_list(discovery_raw.get("exclude"), field_name="discovery.exclude")),
+    )
+
     return AppConfig(
         path=selected_path,
         operator_id=_string(raw.get("operator_id"), field_name="operator_id"),
@@ -162,7 +219,91 @@ def load_app_config(path: Path | None = None, *, environ: Mapping[str, str] | No
         database=_optional_path(raw.get("database"), field_name="database"),
         extractor=extractor,
         projects=projects,
+        discovery=discovery,
     )
+
+
+def _string_list(value: object, *, field_name: str, path: bool = False) -> list:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+        raise ConfigError(f"{field_name} must be a list of non-empty strings")
+    return [Path(item).expanduser() if path else item.strip() for item in value]
+
+
+def _linked_worktree_main(path: Path) -> Path | None:
+    """The main checkout a linked worktree belongs to, or None when `path` is
+    not one (a main checkout's `.git` is a directory; submodules also have a
+    `.git` file but point into `.git/modules`, not `.git/worktrees`)."""
+
+    git = path / ".git"
+    if not git.is_file():
+        return None
+    try:
+        first_line = git.read_text().splitlines()[0]
+    except (OSError, IndexError):
+        return None
+    if not first_line.startswith("gitdir:"):
+        return None
+    gitdir = (path / first_line.removeprefix("gitdir:").strip()).resolve()
+    if gitdir.parent.name != "worktrees" or gitdir.parent.parent.name != ".git":
+        return None
+    return gitdir.parent.parent.parent
+
+
+def _git_checkouts(root: Path) -> list[Path]:
+    """Git checkouts directly under `root`, plus those one level inside a
+    non-repo child (e.g. `lvcore-worktrees/<branch>`)."""
+
+    found: list[Path] = []
+    try:
+        children = sorted(child for child in root.expanduser().iterdir() if child.is_dir() and not child.name.startswith("."))
+    except OSError:
+        return found
+    for child in children:
+        if (child / ".git").exists():
+            found.append(child)
+            continue
+        try:
+            found.extend(sorted(g for g in child.iterdir() if g.is_dir() and not g.name.startswith(".") and (g / ".git").exists()))
+        except OSError:
+            continue
+    return found
+
+
+def discover_projects(discovery: DiscoverySettings, explicit: dict[str, ProjectSettings]) -> dict[str, ProjectSettings]:
+    """Merge Git repositories found under `discovery.roots` into `explicit`.
+
+    A main checkout becomes a project named after its directory. A linked
+    worktree is attached to its main checkout's project (explicit or
+    discovered) and never becomes a project itself; a worktree whose main
+    checkout is not a known project is ignored. Explicit projects win on any ID
+    or root conflict, and `exclude` only filters discovered projects."""
+
+    projects = dict(explicit)
+    known_roots = {project.root.expanduser().resolve() for project in projects.values()}
+    checkouts = [checkout for root in discovery.roots for checkout in _git_checkouts(root)]
+    for checkout in checkouts:
+        resolved = checkout.resolve()
+        if _linked_worktree_main(checkout) is not None or resolved in known_roots:
+            continue
+        identifier = checkout.name
+        if identifier in discovery.exclude or identifier in projects or not PROJECT_ID_PATTERN.fullmatch(identifier):
+            continue
+        projects[identifier] = ProjectSettings(root=resolved, discovered=True)
+        known_roots.add(resolved)
+
+    by_root = {project.root.expanduser().resolve(): identifier for identifier, project in projects.items()}
+    for checkout in checkouts:
+        main = _linked_worktree_main(checkout)
+        identifier = by_root.get(main.resolve()) if main is not None else None
+        if identifier is None:
+            continue
+        project = projects[identifier]
+        worktree = checkout.resolve()
+        if worktree not in project.worktrees:
+            projects[identifier] = replace(project, worktrees=(*project.worktrees, worktree))
+    return projects
 
 
 def _nearest_project_root(path: Path) -> Path:
@@ -179,7 +320,7 @@ def add_project(config_path: Path, path: Path, project_id: str | None = None) ->
     if not PROJECT_ID_PATTERN.fullmatch(identifier):
         raise ConfigError("project ID must use only letters, numbers, dots, underscores, or hyphens")
 
-    existing = load_app_config(config_path) if config_path.exists() else AppConfig()
+    existing = load_app_config(config_path, include_discovered=False) if config_path.exists() else AppConfig()
     if identifier in existing.projects:
         registered_root = existing.projects[identifier].root.expanduser().resolve()
         if registered_root == root:
@@ -207,9 +348,10 @@ def _project_for_cwd(config: AppConfig, cwd: Path) -> tuple[str | None, ProjectS
     matches: list[tuple[int, str, ProjectSettings]] = []
     resolved_cwd = cwd.expanduser().resolve()
     for project_id, project in config.projects.items():
-        root = project.root.resolve()
-        if resolved_cwd == root or resolved_cwd.is_relative_to(root):
-            matches.append((len(root.parts), project_id, project))
+        for candidate in (project.root, *project.worktrees):
+            root = candidate.resolve()
+            if resolved_cwd == root or resolved_cwd.is_relative_to(root):
+                matches.append((len(root.parts), project_id, project))
     if not matches:
         return None, None
     _, project_id, project = max(matches, key=lambda match: match[0])

@@ -23,13 +23,27 @@ class SessionSource:
     updated_at: float | None = None
 
 
+def _encode_claude_path(path: Path) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]", "-", str(path.expanduser().resolve()))
+
+
 def claude_sessions(projects: dict, claude_home: Path, project_id: str | None = None) -> list[SessionSource]:
     selected = {project_id: projects[project_id]} if project_id else projects
+    transcripts_root = claude_home / "projects"
     found: list[SessionSource] = []
     for identifier, project in selected.items():
-        encoded = re.sub(r"[^A-Za-z0-9_-]", "-", str(project.root.expanduser().resolve()))
-        for path in (claude_home / "projects" / encoded).glob("*.jsonl"):
-            found.append(SessionSource("claude_session", path.stem, path, identifier, project.root, updated_at=path.stat().st_mtime))
+        # Linked worktrees have their own transcript directories; Claude Code's
+        # own worktrees live under `<repo>/.claude/worktrees/<name>`, which
+        # encodes to `<repo>--claude-worktrees-<name>`.
+        locations: list[tuple[Path, Path]] = []
+        for checkout in (project.root, *getattr(project, "worktrees", ())):
+            encoded = _encode_claude_path(checkout)
+            locations.append((transcripts_root / encoded, checkout))
+            for claude_worktree in sorted(transcripts_root.glob(f"{encoded}--claude-worktrees-*")):
+                locations.append((claude_worktree, project.root))
+        for directory, root in locations:
+            for path in directory.glob("*.jsonl"):
+                found.append(SessionSource("claude_session", path.stem, path, identifier, root, updated_at=path.stat().st_mtime))
     return sorted(found, key=lambda item: item.path.stat().st_mtime_ns)
 
 

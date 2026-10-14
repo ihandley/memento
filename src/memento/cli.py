@@ -288,6 +288,8 @@ def _global_config_display(app_config, resolved: ResolvedAppConfig) -> dict:
             project_id: {
                 "root": str(project.root),
                 "knowledge_base": str(project.knowledge_base) if project.knowledge_base else None,
+                **({"discovered": True} if project.discovered else {}),
+                **({"worktrees": [str(path) for path in project.worktrees]} if project.worktrees else {}),
             }
             for project_id, project in app_config.projects.items()
         },

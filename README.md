@@ -147,6 +147,24 @@ memento config add-project ~/src/work/schedule-management-service --id schedule-
 The command preserves the existing config file, refuses conflicting IDs or
 roots, and reports `already_registered` when the same project is added again.
 
+To register every Git repository under a directory without listing each one,
+add discovery roots. Each repo directly under a root (or one level inside a
+non-repo folder such as `lvcore-worktrees/`) becomes a project named after its
+directory. Linked worktrees fold into their main checkout's project, and
+explicit `[projects.*]` tables always win:
+
+```toml
+[discovery]
+roots = ["/Users/you/src/work"]
+exclude = ["vault-terraform"]   # directory names; optional
+```
+
+`MEMENTO_PROJECT_ROOTS` (`:`-separated) and `MEMENTO_PROJECT_EXCLUDE`
+(comma-separated) override the TOML values. launchd does not inherit your shell
+environment, so prefer the TOML key for the nightly sync. To backfill newly
+discovered projects in stages, set `MEMENTO_SYNC_SINCE_DAYS=30` for
+`scripts/nightly-sync.sh`, then unset it to widen.
+
 Create the storage directories and inspect the single global configuration:
 
 ```sh
