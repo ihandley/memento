@@ -9,6 +9,8 @@ from ..cursor_client import run_cursor_json
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
+DEFAULT_TIMEOUT_SECONDS = 120
+
 
 def run_extraction_with_retries(
     prompt: str,
@@ -19,6 +21,7 @@ def run_extraction_with_retries(
     mode: str,
     model: str,
     max_output_retries: int,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> list[ExtractedKnowledge]:
     """Call Cursor and parse its response, retrying only invalid output a
     bounded number of times. Shared by every Cursor-backed extractor
@@ -39,7 +42,7 @@ def run_extraction_with_retries(
         try:
             value = run_cursor_json(
                 prompt, executable=executable, runner=runner, workspace=workspace,
-                mode=mode, model=model, timeout=120,
+                mode=mode, model=model, timeout=timeout,
             )
             return ExtractionResult.model_validate(value).records
         except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError) as error:

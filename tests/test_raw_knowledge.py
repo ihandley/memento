@@ -29,6 +29,21 @@ def write_document(path: Path, text: str) -> None:
     path.write_text(text)
 
 
+def test_raw_knowledge_extractor_passes_timeout_to_cursor_call(tmp_path):
+    document = tmp_path / "doc.md"
+    write_document(document, "# Doc\n\nBody.\n")
+    observed: list[int] = []
+
+    def runner(command, **kwargs):
+        observed.append(kwargs["timeout"])
+        return cursor_response({"records": []})
+
+    RawKnowledgeExtractor(runner=runner).extract(document)
+    RawKnowledgeExtractor(runner=runner, timeout_seconds=300).extract(document)
+
+    assert observed == [120, 300]
+
+
 def test_raw_knowledge_extractor_returns_validated_structured_records(tmp_path):
     document = tmp_path / "device-identity-decision.md"
     write_document(

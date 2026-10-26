@@ -18,6 +18,7 @@ provider = "cursor"
 mode = "plan"
 model = "configured-model"
 max_sanitized_chars = 123456
+timeout_seconds = 240
 
 [projects.lvcore]
 root = "/work/lvcore"
@@ -39,6 +40,7 @@ def test_loads_default_config_from_xdg_config_home(tmp_path, monkeypatch):
     assert config.path == config_path
     assert config.operator_id == "config-operator"
     assert config.extractor.max_sanitized_chars == 123456
+    assert config.extractor.timeout_seconds == 240
     assert config.projects["lvcore"].root == Path("/work/lvcore")
 
 
@@ -150,6 +152,32 @@ def test_explicit_values_override_environment_and_config(tmp_path):
     assert resolved.project_root == Path("/cli/project")
     assert resolved.cursor_model == "cli-model"
     assert resolved.max_sanitized_chars == 777
+
+
+def test_timeout_seconds_precedence_is_explicit_then_environment_then_config_then_default(tmp_path):
+    config_path = tmp_path / "config.toml"
+    write_config(config_path)
+    config = load_app_config(config_path)
+    env = {"MEMENTO_TIMEOUT_SECONDS": "360"}
+
+    explicit = resolve_app_config(config, cwd=tmp_path, environ=env, explicit={"timeout_seconds": 480})
+    from_env = resolve_app_config(config, cwd=tmp_path, environ=env)
+    from_config = resolve_app_config(config, cwd=tmp_path, environ={})
+    default = resolve_app_config(load_app_config(), cwd=tmp_path, environ={})
+
+    assert explicit.timeout_seconds == 480
+    assert from_env.timeout_seconds == 360
+    assert from_config.timeout_seconds == 240
+    assert default.timeout_seconds == 120
+
+
+@pytest.mark.parametrize("value", ["0", "-5", '"slow"'])
+def test_timeout_seconds_must_be_a_positive_integer(tmp_path, value):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(f"[extractor]\ntimeout_seconds = {value}\n")
+
+    with pytest.raises(ConfigError, match="timeout_seconds"):
+        load_app_config(config_path)
 
 
 def test_add_project_appends_without_rewriting_existing_config(tmp_path):

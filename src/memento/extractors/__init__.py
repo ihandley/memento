@@ -8,6 +8,7 @@ def create_extractor(
     cursor_mode: str | None = None,
     cursor_model: str | None = None,
     max_sanitized_chars: int | None = None,
+    timeout_seconds: int | None = None,
     operator_id: str | None = None,
     project: ProjectProvenance | None = None,
 ) -> KnowledgeExtractor:
@@ -16,6 +17,7 @@ def create_extractor(
             mode=cursor_mode,
             model=cursor_model,
             max_sanitized_chars=max_sanitized_chars,
+            timeout_seconds=timeout_seconds,
             operator_id=operator_id,
             project=project,
         )

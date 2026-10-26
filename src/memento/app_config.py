@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Mapping
 
 from .envconfig import ENV_PREFIX, LEGACY_ENV_PREFIXES
+from .extractors.cursor_runner import DEFAULT_TIMEOUT_SECONDS
 
 
 class ConfigError(ValueError):
@@ -25,6 +26,7 @@ class ExtractorSettings:
     mode: str = "ask"
     model: str = "auto"
     max_sanitized_chars: int = 20_000
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,7 @@ class ResolvedAppConfig:
     cursor_mode: str
     cursor_model: str
     max_sanitized_chars: int
+    timeout_seconds: int
     project_id: str | None
     project_root: Path | None
     knowledge_base: Path | None
@@ -182,6 +185,11 @@ def _load_explicit_config(path: Path | None, *, environ: Mapping[str, str] | Non
             extractor_raw.get("max_sanitized_chars"),
             field_name="extractor.max_sanitized_chars",
             default=20_000,
+        ),
+        timeout_seconds=_integer(
+            extractor_raw.get("timeout_seconds"),
+            field_name="extractor.timeout_seconds",
+            default=DEFAULT_TIMEOUT_SECONDS,
         ),
     )
     if extractor.mode not in {"ask", "plan"}:
@@ -414,6 +422,14 @@ def resolve_app_config(
     if max_chars <= 0:
         raise ConfigError("max_sanitized_chars must be a positive integer")
 
+    timeout_raw = _first(cli.get("timeout_seconds"), _env(env, "TIMEOUT_SECONDS"), config.extractor.timeout_seconds)
+    try:
+        timeout_seconds = int(timeout_raw)
+    except (TypeError, ValueError) as error:
+        raise ConfigError("timeout_seconds must be a positive integer") from error
+    if timeout_seconds <= 0:
+        raise ConfigError("timeout_seconds must be a positive integer")
+
     return ResolvedAppConfig(
         config_path=config.path,
         operator_id=_first(cli.get("operator_id"), _env(env, "OPERATOR_ID"), config.operator_id),
@@ -425,6 +441,7 @@ def resolve_app_config(
         cursor_mode=str(_first(cli.get("cursor_mode"), _env(env, "CURSOR_MODE"), config.extractor.mode)),
         cursor_model=str(_first(cli.get("cursor_model"), _env(env, "CURSOR_MODEL"), config.extractor.model)),
         max_sanitized_chars=max_chars,
+        timeout_seconds=timeout_seconds,
         project_id=str(selected_project_id) if selected_project_id else None,
         project_root=project_root,
         knowledge_base=configured_project.knowledge_base if configured_project else None,
