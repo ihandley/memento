@@ -61,6 +61,8 @@ Cursor. `[extractor.bifrost]` holds `base_url` (the OpenAI SDK root, such as
 prefix when the gateway routes on one). A one-run override is
 `memento --extractor bifrost ...` or `MEMENTO_EXTRACTOR`.
 
+`memento check-engine` calls the live engine once and prints whether it responded. It does not read a transcript or write a health report.
+
 The Bifrost credential is a macOS Keychain item, not a config value. The
 account is the base URL:
 

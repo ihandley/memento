@@ -41,6 +41,39 @@ def complete_chat(
 ) -> dict:
     """One OpenAI-compatible chat completion. The model string is sent unchanged."""
 
+    return _json_object(_post_chat(
+        prompt, base_url=base_url, model=model, api_key=api_key, timeout=timeout, transport=transport,
+    ))
+
+
+def probe_chat(
+    prompt: str,
+    *,
+    base_url: str,
+    model: str,
+    api_key: str,
+    timeout: int,
+    transport: Transport = urllib_transport,
+) -> str:
+    """One chat completion whose only success condition is a non-empty reply."""
+
+    content = _post_chat(
+        prompt, base_url=base_url, model=model, api_key=api_key, timeout=timeout, transport=transport,
+    ).strip()
+    if not content:
+        raise ValueError("Bifrost completion was empty")
+    return content
+
+
+def _post_chat(
+    prompt: str,
+    *,
+    base_url: str,
+    model: str,
+    api_key: str,
+    timeout: int,
+    transport: Transport,
+) -> str:
     url = chat_completions_url(base_url)
     body = {
         "model": model,
@@ -60,7 +93,7 @@ def complete_chat(
         raise ExtractionPendingRetry(f"Bifrost unavailable: HTTP {status}")
     if status != 200:
         raise ValueError(f"Bifrost returned HTTP {status}")
-    return _parse_completion(text)
+    return _message_content(text)
 
 
 def resolve_api_key(
@@ -76,7 +109,7 @@ def resolve_api_key(
         raise EngineConfigurationError(f"Bifrost Keychain credential is unavailable: {error}") from error
 
 
-def _parse_completion(text: str) -> dict:
+def _message_content(text: str) -> str:
     try:
         payload = json.loads(text)
         content = payload["choices"][0]["message"]["content"]
@@ -84,6 +117,10 @@ def _parse_completion(text: str) -> dict:
         raise ValueError("Bifrost completion was not a chat response") from error
     if not isinstance(content, str):
         raise ValueError("Bifrost completion content must be text")
+    return content
+
+
+def _json_object(content: str) -> dict:
     cleaned = content.strip()
     if cleaned.startswith("```"):
         lines = cleaned.splitlines()

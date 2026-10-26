@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -11,11 +12,12 @@ from pathlib import Path
 
 from .app_config import ConfigError, ResolvedAppConfig, add_project, default_config_path, load_app_config, resolve_app_config
 from .artifacts import artifact_path, find_record, find_sources_by_project, forget_source, job_failures_for_project, load_active_episode_records, source_hash
-from .bifrost_client import complete_chat, resolve_api_key, urllib_transport
+from .bifrost_client import complete_chat, probe_chat, resolve_api_key, urllib_transport
+from .cursor_client import probe_cursor
 from .deduplication import DEFAULT_SEMANTIC_DUPLICATE_THRESHOLD, reconcile_duplicates
 from .extractors import create_extractor
 from .extractors.raw_knowledge import RawKnowledgeExtractor, raw_source_documents, raw_source_id
-from .extractors.base import EngineConfigurationError, KnowledgeExtractor, ProjectProvenance
+from .extractors.base import EngineConfigurationError, ExtractionPendingRetry, KnowledgeExtractor, ProjectProvenance
 from .hook import format_context, handle_user_prompt
 from .health import CursorHealthChecker, HealthChecker, deterministic_findings, grounded_findings, write_report
 from .markdown_kb import MarkdownKnowledgeBaseExtractor, markdown_articles, markdown_source_id
@@ -85,6 +87,22 @@ def _bifrost_complete(resolved: ResolvedAppConfig, *, timeout: int | None = None
         )
 
     return complete
+
+
+def _probe_bifrost(resolved: ResolvedAppConfig) -> str:
+    if not resolved.bifrost_base_url:
+        raise EngineConfigurationError("extractor.bifrost.base_url is required when provider is bifrost")
+    if not resolved.bifrost_model:
+        raise EngineConfigurationError("extractor.bifrost.model is required when provider is bifrost")
+    api_key = resolve_api_key(None, resolved.bifrost_base_url, read_keychain_secret)
+    return probe_chat(
+        "Reply with ok.",
+        base_url=resolved.bifrost_base_url,
+        model=resolved.bifrost_model,
+        api_key=api_key,
+        timeout=resolved.timeout_seconds,
+        transport=urllib_transport,
+    )
 
 
 def _extractor_kwargs(resolved: ResolvedAppConfig) -> dict:
@@ -295,6 +313,7 @@ def parser() -> argparse.ArgumentParser:
     health.add_argument("--ai", action="store_true", help="Send structured Episode Records to Cursor for synthesis")
     health.add_argument("--stale-days", type=int, default=90)
     health.add_argument("--artifacts", type=Path)
+    commands.add_parser("check-engine", help="Call the live extraction engine once")
     forget_cmd = commands.add_parser("forget")
     forget_cmd.add_argument("source_id", nargs="?")
     forget_cmd.add_argument("--project")
@@ -1033,6 +1052,34 @@ def run(
             "findings": rendered_findings,
         }, indent=2))
         return 1 if ai_status == "failed" else 0
+    elif args.command == "check-engine":
+        try:
+            if resolved.extractor_provider == "bifrost":
+                _probe_bifrost(resolved)
+            else:
+                probe_cursor(
+                    "Reply with ok.",
+                    executable="cursor-agent",
+                    runner=subprocess.run,
+                    workspace=Path(tempfile.gettempdir()),
+                    mode=resolved.cursor_mode,
+                    model=resolved.cursor_model,
+                    timeout=resolved.timeout_seconds,
+                )
+        except EngineConfigurationError as error:
+            print(f"configuration error: {error}", file=sys.stderr)
+            return 3
+        except ExtractionPendingRetry as error:
+            print(str(error), file=sys.stderr)
+            return 1
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError) as error:
+            print(f"Cursor unavailable: {type(error).__name__}: {error}", file=sys.stderr)
+            return 1
+        except ValueError as error:
+            print(f"{_engine_label(resolved.extractor_provider)} unavailable: {error}", file=sys.stderr)
+            return 1
+        print(f"{_engine_label(resolved.extractor_provider)} responded")
+        return 0
     elif args.command in {"verify", "reject", "supersede", "history"}:
         record = find_record(artifacts, args.record_id)
         if record is None:
