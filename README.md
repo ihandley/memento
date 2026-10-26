@@ -71,7 +71,8 @@ rebuilt with `memento ingest`.
 - macOS or another Unix-like environment
 - Python 3.12 or 3.13
 - [uv](https://docs.astral.sh/uv/) for installation
-- `cursor-agent` installed and authenticated for conversation extraction
+- `cursor-agent` installed and authenticated when `extractor.provider` is `cursor`
+- a Bifrost gateway base URL, model id, and Keychain item when `extractor.provider` is `bifrost`
 - Claude Code if you want automatic prompt-time retrieval
 
 Confirm the external commands are available:
@@ -134,6 +135,10 @@ root = "/Users/you/src/personal/another-project"
 knowledge_base = "/Users/you/knowledge/another-project/Wiki"
 ```
 
+`provider` is `cursor` or `bifrost`. Leave it as `cursor` until Bifrost is
+configured. See [Configuration](docs/configuration.md) for the Bifrost block,
+the Keychain item, and the `sources` list that `memento import-sources` runs.
+
 Use any stable name for each project table, such as `lvcore`. `root` is the
 local repository directory. `knowledge_base` is optional.
 
@@ -171,7 +176,8 @@ exclude = ["vault-terraform"]   # directory names; optional
 (comma-separated) override the TOML values. launchd does not inherit your shell
 environment, so prefer the TOML key for the nightly sync. To backfill newly
 discovered projects in stages, set `MEMENTO_SYNC_SINCE_DAYS=30` for
-`scripts/nightly-sync.sh`, then unset it to widen.
+`scripts/nightly-sync.sh`. That window applies to every adapter. Unset it to
+widen. Sources with no timestamp, including Confluence pages, stay in the run.
 
 Create the storage directories and inspect the single global configuration:
 
@@ -195,7 +201,7 @@ old config paths remain fallback compatibility mechanisms.
 
 ### Preview first
 
-Extraction uses Cursor model quota. A dry run discovers candidates without
+Extraction uses the configured engine's quota. A dry run discovers candidates without
 calling the model:
 
 ```sh
@@ -362,7 +368,7 @@ import without `--resume` to treat that content as a new revision:
 memento import-sessions --source claude --project current
 ```
 
-For `pending_retry`, restore Cursor authentication, availability, or quota and
+For `pending_retry`, restore the live engine (Cursor authentication and quota, or the Bifrost gateway) and
 then use `--resume`. For `failed`, correct the extractor or malformed input
 problem named in the report before retrying. If you intentionally leave a
 source blocked, no further action is required; subsequent normal imports will
@@ -379,7 +385,7 @@ memento import-markdown-kb /path/to/Wiki \
 memento ingest
 ```
 
-Markdown import is deterministic and does not spend Cursor model quota.
+Markdown import is deterministic and does not call the extraction engine.
 
 ### Import RAW knowledge sources
 
@@ -524,15 +530,15 @@ unscoped Cursor conversations.
 
 ## 6. Automate nightly sync
 
-`scripts/nightly-sync.sh` pulls new Claude and Cursor sessions across all
-projects, plus any Confluence pages you list, into the shared artifact store
-and index. It's idempotent (dedup by content hash), so a re-run over
-unchanged content costs nothing.
+`scripts/nightly-sync.sh` runs `memento import-sources`. That command imports
+every adapter named in `sources` (Claude, Cursor, and Confluence when the key
+is omitted) and rebuilds the index once. It's idempotent (dedup by content
+hash), so a re-run over unchanged content costs nothing.
 
 List Confluence pages to sync in `~/.config/memento/confluence-urls.txt`,
 one per line: `PROJECT_ID URL`. Blank lines and `#`-prefixed lines are
-ignored, and URLs are grouped by project so each project gets a single
-`import-url` call.
+ignored. Add `markdown` or `raw` to `sources` when a project has a
+`knowledge_base` to import.
 
 ```
 # format: PROJECT_ID URL

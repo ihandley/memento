@@ -50,11 +50,15 @@ class CursorHealthChecker:
     def __init__(
         self, *, mode: str, model: str, runner: Callable = subprocess.run,
         sensitive_paths: tuple[str, ...] = (),
+        complete: Callable[[str], dict] | None = None,
+        timeout_seconds: int = 180,
     ) -> None:
         self.mode = mode
         self.model = model
         self.runner = runner
         self.sensitive_paths = sensitive_paths
+        self._complete = complete
+        self._timeout_seconds = timeout_seconds
 
     def analyze(self, project_id: str, records: list[dict]) -> list[HealthFinding]:
         safe_records = [
@@ -91,11 +95,15 @@ class CursorHealthChecker:
                 "recommended_action": "string",
             },
         }
-        value = run_cursor_json(
-            "You are a read-only knowledge-base auditor.\n" + json.dumps(request),
-            executable="cursor-agent", runner=self.runner, workspace=Path(tempfile.gettempdir()),
-            mode=self.mode, model=self.model, timeout=180,
-        )
+        prompt = "You are a read-only knowledge-base auditor.\n" + json.dumps(request)
+        if self._complete is not None:
+            value = self._complete(prompt)
+        else:
+            value = run_cursor_json(
+                prompt,
+                executable="cursor-agent", runner=self.runner, workspace=Path(tempfile.gettempdir()),
+                mode=self.mode, model=self.model, timeout=self._timeout_seconds,
+            )
         result = HealthSynthesis.model_validate(value)
         return result.findings
 

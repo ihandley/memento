@@ -8,6 +8,34 @@ from pathlib import Path
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
+def probe_cursor(
+    prompt: str,
+    *,
+    executable: str,
+    runner: Runner,
+    workspace: Path,
+    mode: str,
+    model: str,
+    timeout: int,
+) -> str:
+    """One Cursor call whose only success condition is a non-empty result."""
+
+    completed = runner(
+        [executable, "--print", "--output-format", "json", "--mode", mode, "--model", model,
+         "--sandbox", "enabled", "--workspace", str(workspace), "--trust"],
+        input=prompt, text=True, capture_output=True, check=True, timeout=timeout,
+    )
+    envelope = json.loads(completed.stdout)
+    if not isinstance(envelope, dict):
+        raise ValueError("Cursor envelope must be a JSON object")
+    if envelope.get("type") != "result" or envelope.get("subtype") != "success":
+        raise ValueError(f"Cursor did not return a successful result: {envelope.get('subtype')!r}")
+    result_text = envelope.get("result")
+    if not isinstance(result_text, str) or not result_text.strip():
+        raise ValueError("Cursor result must be text")
+    return result_text
+
+
 def run_cursor_json(
     prompt: str,
     *,

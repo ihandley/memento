@@ -18,6 +18,15 @@ class ConfigError(ValueError):
 
 
 PROJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+SOURCE_NAMES = frozenset({"claude", "cursor", "markdown", "raw", "confluence"})
+DEFAULT_SOURCES = ("claude", "cursor", "confluence")
+EXTRACTOR_PROVIDERS = frozenset({"cursor", "bifrost"})
+
+
+@dataclass(frozen=True)
+class BifrostSettings:
+    base_url: str | None = None
+    model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -27,6 +36,7 @@ class ExtractorSettings:
     model: str = "auto"
     max_sanitized_chars: int = 20_000
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
+    bifrost: BifrostSettings = field(default_factory=BifrostSettings)
 
 
 @dataclass(frozen=True)
@@ -55,6 +65,8 @@ class AppConfig:
     artifacts: Path | None = None
     database: Path | None = None
     extractor: ExtractorSettings = field(default_factory=ExtractorSettings)
+    # None means the key was omitted and the default source list applies.
+    sources: tuple[str, ...] | None = None
     projects: dict[str, ProjectSettings] = field(default_factory=dict)
     discovery: DiscoverySettings = field(default_factory=DiscoverySettings)
 
@@ -68,8 +80,11 @@ class ResolvedAppConfig:
     extractor_provider: str
     cursor_mode: str
     cursor_model: str
+    bifrost_base_url: str | None
+    bifrost_model: str | None
     max_sanitized_chars: int
     timeout_seconds: int
+    sources: tuple[str, ...]
     project_id: str | None
     project_root: Path | None
     knowledge_base: Path | None
@@ -177,8 +192,14 @@ def _load_explicit_config(path: Path | None, *, environ: Mapping[str, str] | Non
     extractor_raw = raw.get("extractor", {})
     if not isinstance(extractor_raw, dict):
         raise ConfigError("extractor must be a TOML table")
+    bifrost_raw = extractor_raw.get("bifrost", {})
+    if not isinstance(bifrost_raw, dict):
+        raise ConfigError("extractor.bifrost must be a TOML table")
+    provider = _string(extractor_raw.get("provider"), field_name="extractor.provider", default="cursor")
+    if provider not in EXTRACTOR_PROVIDERS:
+        raise ConfigError("extractor.provider must be 'cursor' or 'bifrost'")
     extractor = ExtractorSettings(
-        provider=_string(extractor_raw.get("provider"), field_name="extractor.provider", default="cursor"),
+        provider=provider,
         mode=_string(extractor_raw.get("mode"), field_name="extractor.mode", default="ask"),
         model=_string(extractor_raw.get("model"), field_name="extractor.model", default="auto"),
         max_sanitized_chars=_integer(
@@ -191,9 +212,14 @@ def _load_explicit_config(path: Path | None, *, environ: Mapping[str, str] | Non
             field_name="extractor.timeout_seconds",
             default=DEFAULT_TIMEOUT_SECONDS,
         ),
+        bifrost=BifrostSettings(
+            base_url=_string(bifrost_raw.get("base_url"), field_name="extractor.bifrost.base_url"),
+            model=_string(bifrost_raw.get("model"), field_name="extractor.bifrost.model"),
+        ),
     )
     if extractor.mode not in {"ask", "plan"}:
         raise ConfigError("extractor.mode must be 'ask' or 'plan'")
+    sources = _sources(raw.get("sources") if "sources" in raw else None)
 
     projects_raw = raw.get("projects", {})
     if not isinstance(projects_raw, dict):
@@ -226,9 +252,24 @@ def _load_explicit_config(path: Path | None, *, environ: Mapping[str, str] | Non
         artifacts=_optional_path(raw.get("artifacts"), field_name="artifacts"),
         database=_optional_path(raw.get("database"), field_name="database"),
         extractor=extractor,
+        sources=sources,
         projects=projects,
         discovery=discovery,
     )
+
+
+def _sources(value: object) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+        raise ConfigError("sources must be a list of non-empty strings")
+    names = tuple(item.strip() for item in value)
+    unknown = [name for name in names if name not in SOURCE_NAMES]
+    if unknown:
+        raise ConfigError(f"sources contains unknown name {unknown[0]!r}")
+    if len(names) != len(set(names)):
+        raise ConfigError("sources contains a repeated name")
+    return names
 
 
 def _string_list(value: object, *, field_name: str, path: bool = False) -> list:
@@ -430,18 +471,23 @@ def resolve_app_config(
     if timeout_seconds <= 0:
         raise ConfigError("timeout_seconds must be a positive integer")
 
+    provider = str(_first(cli.get("extractor_provider"), _env(env, "EXTRACTOR"), config.extractor.provider))
+    if provider not in EXTRACTOR_PROVIDERS:
+        raise ConfigError("extractor.provider must be 'cursor' or 'bifrost'")
+
     return ResolvedAppConfig(
         config_path=config.path,
         operator_id=_first(cli.get("operator_id"), _env(env, "OPERATOR_ID"), config.operator_id),
         artifacts=_resolved_path(_first(cli.get("artifacts"), _env(env, "ARTIFACTS"), config.artifacts)),
         database=_resolved_path(_first(cli.get("database"), _env(env, "DATABASE"), config.database)),
-        extractor_provider=str(
-            _first(cli.get("extractor_provider"), _env(env, "EXTRACTOR"), config.extractor.provider)
-        ),
+        extractor_provider=provider,
         cursor_mode=str(_first(cli.get("cursor_mode"), _env(env, "CURSOR_MODE"), config.extractor.mode)),
         cursor_model=str(_first(cli.get("cursor_model"), _env(env, "CURSOR_MODEL"), config.extractor.model)),
+        bifrost_base_url=config.extractor.bifrost.base_url,
+        bifrost_model=config.extractor.bifrost.model,
         max_sanitized_chars=max_chars,
         timeout_seconds=timeout_seconds,
+        sources=DEFAULT_SOURCES if config.sources is None else config.sources,
         project_id=str(selected_project_id) if selected_project_id else None,
         project_root=project_root,
         knowledge_base=configured_project.knowledge_base if configured_project else None,

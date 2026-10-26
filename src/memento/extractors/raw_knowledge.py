@@ -20,6 +20,7 @@ from .base import (
 )
 from ..sanitize import DEFAULT_MAX_SANITIZED_CHARS, SanitizationBudgetExceeded, SanitizedSession, sanitize_document
 from ..envconfig import env_value
+from .bifrost import run_bifrost_with_retries
 from .cursor_runner import DEFAULT_TIMEOUT_SECONDS, run_extraction_with_retries
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
@@ -111,6 +112,7 @@ class RawKnowledgeExtractor:
         source_id: str | None = None,
         source_uri: str | None = None,
         source_type: str = "raw_knowledge_source",
+        complete: Callable[[str], dict] | None = None,
     ) -> None:
         self._executable = executable
         self._runner = runner
@@ -146,6 +148,9 @@ class RawKnowledgeExtractor:
         self._source_id = source_id
         self._source_uri = source_uri
         self._source_type = source_type
+        self._complete = complete
+        if complete is not None and model:
+            self._model = model
 
     @property
     def model(self) -> str:
@@ -190,6 +195,10 @@ class RawKnowledgeExtractor:
             raise ExtractionError(f"Extracted record failed trusted provenance validation: {error}") from error
 
     def _run_with_retries(self, prompt: str) -> list[ExtractedKnowledge]:
+        if self._complete is not None:
+            return run_bifrost_with_retries(
+                prompt, complete=self._complete, max_output_retries=self._max_output_retries
+            )
         return run_extraction_with_retries(
             prompt, executable=self._executable, runner=self._runner, workspace=self._workspace,
             mode=self._mode, model=self._model, max_output_retries=self._max_output_retries,
