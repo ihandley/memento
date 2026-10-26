@@ -171,6 +171,7 @@ def parser() -> argparse.ArgumentParser:
     extract.add_argument("--project-id")
     extract.add_argument("--project-root")
     extract.add_argument("--max-sanitized-chars", type=int)
+    extract.add_argument("--timeout", dest="timeout_seconds", type=int, help="Seconds before a Cursor call times out")
     extract_raw = commands.add_parser("extract-raw-source")
     extract_raw.add_argument("document", type=Path)
     _add_storage_args(extract_raw, database=False)
@@ -180,6 +181,7 @@ def parser() -> argparse.ArgumentParser:
     extract_raw.add_argument("--project-id")
     extract_raw.add_argument("--project-root")
     extract_raw.add_argument("--max-sanitized-chars", type=int)
+    extract_raw.add_argument("--timeout", dest="timeout_seconds", type=int, help="Seconds before a Cursor call times out")
     import_raw = commands.add_parser("import-raw-sources")
     import_raw.add_argument("raw_dir", type=Path, nargs="?")
     import_raw.add_argument("--knowledge-base-id", required=True)
@@ -189,6 +191,7 @@ def parser() -> argparse.ArgumentParser:
     import_raw.add_argument("--cursor-mode", choices=["ask", "plan"])
     import_raw.add_argument("--cursor-model")
     import_raw.add_argument("--max-sanitized-chars", type=int)
+    import_raw.add_argument("--timeout", dest="timeout_seconds", type=int, help="Seconds before a Cursor call times out")
     import_raw.add_argument("--dry-run", action="store_true")
     import_raw.add_argument("--resume", action="store_true", help="Retry only previously failed or blocked documents")
     _add_storage_args(import_raw)
@@ -201,6 +204,7 @@ def parser() -> argparse.ArgumentParser:
     import_url.add_argument("--cursor-mode", choices=["ask", "plan"])
     import_url.add_argument("--cursor-model")
     import_url.add_argument("--max-sanitized-chars", type=int)
+    import_url.add_argument("--timeout", dest="timeout_seconds", type=int, help="Seconds before a Cursor call times out")
     import_url.add_argument("--dry-run", action="store_true")
     import_url.add_argument("--resume", action="store_true", help="Retry only previously failed or blocked pages")
     _add_storage_args(import_url)
@@ -252,6 +256,7 @@ def parser() -> argparse.ArgumentParser:
     batch.add_argument("--since", help="Only sessions updated on/after YYYY-MM-DD")
     batch.add_argument("--resume", action="store_true", help="Retry only previously failed or blocked sessions")
     batch.add_argument("--cursor-database", type=Path)
+    batch.add_argument("--timeout", dest="timeout_seconds", type=int, help="Seconds before a Cursor call times out")
     report_cmd = commands.add_parser("report")
     report_cmd.add_argument("--artifacts", type=Path)
     report_cmd.add_argument("--json", action="store_true")
@@ -276,6 +281,7 @@ def _explicit_config(args: argparse.Namespace) -> dict[str, object]:
         "cursor_mode",
         "cursor_model",
         "max_sanitized_chars",
+        "timeout_seconds",
     )
     values = {name: getattr(args, name, None) for name in names}
     values["extractor_provider"] = getattr(args, "extractor", None)
@@ -302,6 +308,7 @@ def _global_config_display(app_config, resolved: ResolvedAppConfig) -> dict:
             "mode": resolved.cursor_mode,
             "model": resolved.cursor_model,
             "max_sanitized_chars": resolved.max_sanitized_chars,
+            "timeout_seconds": resolved.timeout_seconds,
         },
         "projects": {
             project_id: {
@@ -450,6 +457,7 @@ def run(
                 cursor_mode=resolved.cursor_mode,
                 cursor_model=resolved.cursor_model,
                 max_sanitized_chars=resolved.max_sanitized_chars,
+                timeout_seconds=resolved.timeout_seconds,
                 operator_id=resolved.operator_id,
                 project=project,
             )
@@ -528,6 +536,7 @@ def run(
                 selected = extractor or CursorExtractor(
                     mode=resolved.cursor_mode, model=resolved.cursor_model,
                     max_sanitized_chars=resolved.max_sanitized_chars,
+                    timeout_seconds=resolved.timeout_seconds,
                     operator_id=resolved.operator_id, project=project,
                     source_type=source.source_type, source_id=source.source_id, source_uri=source.source_uri,
                 )
@@ -606,6 +615,7 @@ def run(
                 cursor_mode=resolved.cursor_mode,
                 cursor_model=resolved.cursor_model,
                 max_sanitized_chars=resolved.max_sanitized_chars,
+                timeout_seconds=resolved.timeout_seconds,
                 operator_id=resolved.operator_id,
                 project=project,
             )
@@ -652,6 +662,7 @@ def run(
                 mode=resolved.cursor_mode,
                 model=resolved.cursor_model,
                 max_sanitized_chars=resolved.max_sanitized_chars,
+                timeout_seconds=resolved.timeout_seconds,
                 operator_id=resolved.operator_id,
                 project=project,
             )
@@ -716,6 +727,7 @@ def run(
                     mode=args.cursor_mode or resolved.cursor_mode,
                     model=args.cursor_model or resolved.cursor_model,
                     max_sanitized_chars=args.max_sanitized_chars or resolved.max_sanitized_chars,
+                    timeout_seconds=resolved.timeout_seconds,
                     operator_id=args.operator_id or resolved.operator_id,
                     project=ProjectProvenance(project_id=project_id, project_root=project_root),
                 )
@@ -771,6 +783,7 @@ def run(
                     mode=args.cursor_mode or resolved.cursor_mode,
                     model=args.cursor_model or resolved.cursor_model,
                     max_sanitized_chars=args.max_sanitized_chars or resolved.max_sanitized_chars,
+                    timeout_seconds=resolved.timeout_seconds,
                     operator_id=args.operator_id or resolved.operator_id,
                     project=ProjectProvenance(project_id=project_id, project_root=project_root),
                     source_type="confluence_page",

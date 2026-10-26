@@ -19,7 +19,7 @@ from .base import (
 )
 from ..sanitize import DEFAULT_MAX_SANITIZED_CHARS, SanitizationBudgetExceeded, SanitizedSession, sanitize_session
 from ..envconfig import env_value
-from .cursor_runner import run_extraction_with_retries
+from .cursor_runner import DEFAULT_TIMEOUT_SECONDS, run_extraction_with_retries
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
@@ -87,6 +87,7 @@ class CursorExtractor:
         model: str | None = None,
         sensitive_paths: tuple[str, ...] | None = None,
         max_sanitized_chars: int | None = None,
+        timeout_seconds: int | None = None,
         operator_id: str | None = None,
         project: ProjectProvenance | None = None,
         prompt_version: int | None = None,
@@ -109,6 +110,9 @@ class CursorExtractor:
             self._sensitive_paths = tuple(p for p in configured_paths.split(":") if p)
         self._max_sanitized_chars = max_sanitized_chars or int(
             _configured(None, "MEMENTO_MAX_SANITIZED_CHARS", str(DEFAULT_MAX_SANITIZED_CHARS))
+        )
+        self._timeout_seconds = timeout_seconds or int(
+            _configured(None, "MEMENTO_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))
         )
         self._operator_id = _configured(operator_id, "MEMENTO_OPERATOR_ID", "")
         if not self._operator_id:
@@ -184,6 +188,7 @@ class CursorExtractor:
         return run_extraction_with_retries(
             prompt, executable=self._executable, runner=self._runner, workspace=self._workspace,
             mode=self._mode, model=self._model, max_output_retries=self._max_output_retries,
+            timeout=self._timeout_seconds,
         )
 
     @staticmethod

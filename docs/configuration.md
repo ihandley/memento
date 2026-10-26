@@ -23,6 +23,7 @@ provider = "cursor"
 mode = "ask"
 model = "gemini-3.7-flash-low"
 max_sanitized_chars = 500000
+timeout_seconds = 120
 
 [projects.lvcore]
 root = "/Users/ian.handley/src/work/lvcore"

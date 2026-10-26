@@ -86,6 +86,21 @@ def test_cursor_extractor_raises_pending_retry_on_timeout(tmp_path):
         CursorExtractor(runner=runner).extract(transcript)
 
 
+def test_cursor_extractor_passes_timeout_to_cursor_call(tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    write_transcript(transcript)
+    observed: list[int] = []
+
+    def runner(command, **kwargs):
+        observed.append(kwargs["timeout"])
+        return cursor_response({"records": []})
+
+    CursorExtractor(runner=runner).extract(transcript)
+    CursorExtractor(runner=runner, timeout_seconds=300).extract(transcript)
+
+    assert observed == [120, 300]
+
+
 def test_cursor_extractor_raises_pending_retry_on_nonzero_exit(tmp_path):
     transcript = tmp_path / "session.jsonl"
     write_transcript(transcript)

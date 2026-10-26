@@ -74,6 +74,24 @@ def _extract_and_activate(artifacts_dir, transcript, content, question, summary)
     run(["extract-session", str(transcript), "--artifacts", str(artifacts_dir)], extractor=FakeExtractor([record]))
 
 
+def test_cli_extract_session_passes_timeout_flag_to_extractor(tmp_path, monkeypatch):
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text('{"type":"user","message":{"content":"hi"}}\n')
+    observed = []
+
+    def fake_create_extractor(name, **kwargs):
+        observed.append(kwargs["timeout_seconds"])
+        return FakeExtractor([make_record(source=str(transcript), source_session_id=transcript.stem)])
+
+    monkeypatch.setattr("memento.cli.create_extractor", fake_create_extractor)
+    base = ["extract-session", str(transcript), "--artifacts", str(tmp_path / "artifacts")]
+
+    assert run([*base, "--timeout", "300"]) == 0
+    assert run(base) == 0
+
+    assert observed == [300, 120]
+
+
 def test_cli_ingests_from_artifacts_and_returns_cited_search_results(tmp_path, capsys):
     transcript = tmp_path / "session-123.jsonl"
     artifacts_dir = tmp_path / "artifacts"
@@ -136,6 +154,7 @@ def test_cli_config_show_reports_global_config_and_all_registered_projects(tmp_p
         'mode = "ask"\n'
         'model = "test-model"\n'
         'max_sanitized_chars = 500000\n'
+        'timeout_seconds = 300\n'
         '[projects.lvcore]\n'
         f'root = "{project_root}"\n'
     )
@@ -146,6 +165,7 @@ def test_cli_config_show_reports_global_config_and_all_registered_projects(tmp_p
     shown = json.loads(capsys.readouterr().out)
     assert shown["operator_id"] == "ian"
     assert shown["extractor"]["max_sanitized_chars"] == 500000
+    assert shown["extractor"]["timeout_seconds"] == 300
     assert shown["projects"] == {
         "lvcore": {"root": str(project_root), "knowledge_base": None}
     }

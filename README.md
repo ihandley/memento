@@ -124,6 +124,7 @@ provider = "cursor"
 mode = "ask"
 model = "gemini-3.7-flash-low"
 max_sanitized_chars = 500000
+timeout_seconds = 120
 
 [projects.my-project]
 root = "/Users/you/src/work/my-project"
@@ -672,7 +673,8 @@ sessions using `--since`. Memento refuses silent truncation.
 **Cursor is unavailable, times out, or runs out of quota**
 
 The session is marked `pending_retry`; authenticate or wait for quota, then use
-`--resume`. Memento does not fall back to raw turn indexing or another provider.
+`--resume`. For repeated timeouts on large sources, raise `extractor.timeout_seconds` (default 120) or pass
+`--timeout SECONDS` to the import or extract command. Memento does not fall back to raw turn indexing or another provider.
 
 **Search finds nothing after a manual extraction**
 
