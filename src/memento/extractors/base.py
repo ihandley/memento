@@ -140,6 +140,18 @@ class ExtractionBlocked(ExtractionError):
         super().__init__(reason)
 
 
+class EngineConfigurationError(RuntimeError):
+    """The live engine is misconfigured or refused the call (missing key, HTTP 401 or 403).
+
+    This is not a per-source outcome. Callers stop the run instead of recording
+    a retryable failure or falling through to another engine.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
 class ExtractionPendingRetry(ExtractionError):
     """Cursor was unavailable, timed out, or reported non-success (e.g. quota
     exhaustion) — an infra-level condition, retryable later without penalty.

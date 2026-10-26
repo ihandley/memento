@@ -25,6 +25,10 @@ model = "gemini-3.7-flash-low"
 max_sanitized_chars = 500000
 timeout_seconds = 120
 
+[extractor.bifrost]
+base_url = "https://bifrost.example/openai"
+model = "bedrock/anthropic.claude"
+
 [projects.lvcore]
 root = "/Users/ian.handley/src/work/lvcore"
 knowledge_base = "/Users/ian.handley/src/personal/second-brain/lvcore_kb/Wiki"
@@ -47,6 +51,32 @@ memory config add-project ~/src/work/schedule-management-service --id schedule-s
 
 Registration is idempotent for the same ID and root. Conflicting IDs or roots
 are rejected rather than silently changing existing provenance.
+
+`extractor.provider` chooses the live engine: `cursor` or `bifrost`. An omitted
+provider stays `cursor`. Both blocks can sit in the file together. Switching
+is changing `provider`. The inactive block is kept and is not called. Existing
+artifacts stay in the index. `mode` and `model` on `[extractor]` configure
+Cursor. `[extractor.bifrost]` holds `base_url` (the OpenAI SDK root, such as
+`https://host/openai`) and `model` (sent unchanged, so include a `bedrock/`
+prefix when the gateway routes on one). A one-run override is
+`memento --extractor bifrost ...` or `MEMENTO_EXTRACTOR`.
+
+The Bifrost credential is a macOS Keychain item, not a config value. The
+account is the base URL:
+
+```sh
+security add-generic-password -a 'https://bifrost.example/openai' -s memento-bifrost-api-key -w 'PASTE_TOKEN_HERE'
+```
+
+A top-level `sources` array chooses which adapters nightly imports, in order:
+`claude`, `cursor`, `markdown`, `raw`, `confluence`. An omitted key means
+`claude`, `cursor`, and `confluence`. An empty array imports nothing. A
+repeated or unknown name is a configuration error. `memento import-sources`
+runs that list and rebuilds the index once. `--dry-run`, `--since`, and
+`--resume` apply to every adapter. A source with no timestamp stays in a
+`--since` run. Project roots select Claude sessions. `knowledge_base` selects
+Markdown and raw files. Cursor stays machine-global. Confluence reads
+`confluence-urls.txt` beside the config file (`PROJECT_ID URL` per line).
 
 When the current directory is inside a configured project root, Memento
 selects the most specific matching project. Prompt text can never select or
@@ -109,7 +139,7 @@ provisional cosine floor with `MEMORY_SEMANTIC_DUPLICATE_THRESHOLD` (default
 
 Run `memory health-check --project-id PROJECT_ID` for a local, read-only audit.
 Add `--ai` only when you explicitly want structured Episode Records sent to the
-configured Cursor model for contradiction, coverage-gap, and article
+configured engine for contradiction, coverage-gap, and article
 suggestions. Both modes write a durable report and apply no changes.
 
 `capture` refuses to run unless the selected project ID and root match a

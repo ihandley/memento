@@ -111,7 +111,11 @@ def test_never_retrieved_excludes_recent_and_cited_records(tmp_path):
     from memento.retrieval import TRACE_LOG_NAME
 
     old_record = _activate_record(tmp_path, source_id="old")
-    stale = never_retrieved(tmp_path, min_age_days=14, now=NOW + timedelta(days=30))
+    # Artifacts stamp extracted_at from the wall clock, so the query clock has to
+    # sit after that stamp. The September fixture date is now older than the
+    # 14-day window relative to a record written today.
+    query_now = datetime.now(timezone.utc) + timedelta(days=30)
+    stale = never_retrieved(tmp_path, min_age_days=14, now=query_now)
 
     assert stale == [{
         "id": old_record["id"],
@@ -121,7 +125,7 @@ def test_never_retrieved_excludes_recent_and_cited_records(tmp_path):
     }]
 
     append_json_line(tmp_path / TRACE_LOG_NAME, {"returned_ids": [old_record["id"]], "logged_at": NOW.isoformat()})
-    assert never_retrieved(tmp_path, min_age_days=14, now=NOW + timedelta(days=30)) == []
+    assert never_retrieved(tmp_path, min_age_days=14, now=query_now) == []
 
 
 def test_generate_report_has_every_section(tmp_path):

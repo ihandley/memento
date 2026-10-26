@@ -1,15 +1,16 @@
 #!/bin/sh
-# Nightly Memento sync: pulls new Claude/Cursor sessions, plus any
-# Confluence pages listed in confluence-urls.txt, into the shared artifact
-# store + index. Idempotent — dedups by content hash, so a re-run over
-# unchanged content costs nothing (no Cursor calls, no index churn).
+# Nightly Memento sync. Runs `memento import-sources`, which imports every
+# adapter named in ~/.config/memento/config.toml `sources` (Claude, Cursor,
+# and Confluence when that key is omitted). Confluence pages still come from
+# confluence-urls.txt. Markdown and raw files stay off until their names are
+# added. Idempotent — dedups by content hash, so a re-run over unchanged
+# content costs nothing.
 #
 # second-brain (RAW/Wiki knowledge bases) is retired as of 2026-09-14 — its
 # lvcore and beacon content was fully captured into Memento and the live
-# directory archived to ~/src/personal/second-brain-archive, no longer fed
-# with new sources. No import step for it here: nothing new will ever land
-# there. If a similar KB is started again elsewhere, add its
-# import-markdown-kb / import-raw-sources steps back into this script.
+# directory archived to ~/src/personal/second-brain-archive. To import a new
+# knowledge base, register its path on the project and add `markdown` or
+# `raw` to `sources`.
 #
 # Not Slack-integrated on purpose: an unattended cron job must never
 # auto-send a message on Ian's behalf. Problems surface as a local macOS
@@ -29,7 +30,6 @@ export MEMENTO_ATLASSIAN_EMAIL="ian.handley@lvt.com"
 MEMENTO="$HOME/.local/bin/memento"
 LOG_DIR="$HOME/.local/share/memento/logs"
 LOG_FILE="$LOG_DIR/nightly-sync-$(date +%Y-%m-%d).log"
-CONFLUENCE_URLS_FILE="$HOME/.config/memento/confluence-urls.txt"
 mkdir -p "$LOG_DIR"
 
 # Resolved once so log_sync_run doesn't re-invoke `memento config show` per
@@ -74,17 +74,22 @@ try:
     data = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
-entry = {
-    'label': label,
-    'logged_at': datetime.now(timezone.utc).isoformat(),
-    'discovered': data.get('discovered', 0),
-    'activated': data.get('activated', 0),
-    'blocked': data.get('blocked', 0),
-    'failed': data.get('failed', 0),
-    'pending_retry': data.get('pending_retry', 0),
-}
+adapters = data.get("adapters")
+rows = adapters.items() if isinstance(adapters, dict) else [(label, data)]
 with open(path, 'a') as handle:
-    handle.write(json.dumps(entry) + '\n')
+    for name, row in rows:
+        if not isinstance(row, dict):
+            continue
+        entry = {
+            'label': name,
+            'logged_at': datetime.now(timezone.utc).isoformat(),
+            'discovered': row.get('discovered', 0),
+            'activated': row.get('activated', 0),
+            'blocked': row.get('blocked', 0),
+            'failed': row.get('failed', 0),
+            'pending_retry': row.get('pending_retry', 0),
+        }
+        handle.write(json.dumps(entry) + '\n')
 " "$label" "$ARTIFACTS_ROOT/sync_history.jsonl" 2>/dev/null || true
 }
 
@@ -94,7 +99,19 @@ with open(path, 'a') as handle:
 # several blobs — word-splitting a dynamic list of multi-line strings isn't
 # safe in POSIX sh.
 count_problems() {
-  blocked=$(printf '%s' "$1" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('blocked',0)+d.get('failed',0))" 2>/dev/null || echo 0)
+  blocked=$(printf '%s' "$1" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print(0)
+    raise SystemExit
+adapters = data.get('adapters')
+if isinstance(adapters, dict):
+    print(sum(row.get('blocked', 0) + row.get('failed', 0) for row in adapters.values() if isinstance(row, dict)))
+else:
+    print(data.get('blocked', 0) + data.get('failed', 0))
+" 2>/dev/null || echo 0)
   if [ "${blocked:-0}" != "0" ] && [ "${blocked:-0}" != "" ]; then
     problems="${problems}${blocked} blocked/failed source(s); "
   fi
@@ -102,49 +119,32 @@ count_problems() {
 
 log "=== nightly sync starting ==="
 
-# Optional: limit Claude discovery to sessions updated in the last N days.
+# Optional: limit discovery to sources updated in the last N days.
 # Set MEMENTO_SYNC_SINCE_DAYS while backfilling newly discovered projects
-# (MEMENTO_PROJECT_ROOTS / [discovery] roots) in stages; unset it to widen.
+# in stages; unset it to widen. The window applies to every adapter.
+# Sources with no timestamp, including Confluence pages, stay in the run.
 SINCE_ARGS=""
 if [ -n "${MEMENTO_SYNC_SINCE_DAYS:-}" ]; then
   SINCE_ARGS="--since $(date -v-"${MEMENTO_SYNC_SINCE_DAYS}"d +%Y-%m-%d)"
 fi
 
 # shellcheck disable=SC2086 # SINCE_ARGS is intentionally word-split.
-sessions_claude=$(run_step "import Claude sessions (all projects)" "$MEMENTO" import-sessions --source claude --all-projects $SINCE_ARGS)
-log_sync_run "claude_sessions" "$sessions_claude"
-sessions_cursor=$(run_step "import Cursor conversations" "$MEMENTO" import-sessions --source cursor)
-log_sync_run "cursor_sessions" "$sessions_cursor"
+import_output=$(run_step "import configured sources" "$MEMENTO" import-sources $SINCE_ARGS)
+log_sync_run "import-sources" "$import_output"
 
 # Surface anything that needs a human: real failures immediately, and
 # pending_retry only once it's stale (younger than 48h self-heals on its own
 # on tomorrow's run — see run_extraction's hash-based re-candidacy, no code
 # needed for that case).
 problems=""
-count_problems "$sessions_claude"
-count_problems "$sessions_cursor"
+count_problems "$import_output"
 
-# pending_retry alone looks self-healing, but a permanently broken extractor
-# (e.g. the configured model removed from cursor-agent, 2026-09-30) also lands
-# there and retries forever. Any "Cursor unavailable" reason means extraction
-# itself is failing, so say so the first night rather than after 48h.
-cursor_unavailable=$(printf '%s\n%s' "$sessions_claude" "$sessions_cursor" | grep -c 'Cursor unavailable' || true)
-if [ "${cursor_unavailable:-0}" != "0" ]; then
-  problems="${problems}Cursor extraction failing for ${cursor_unavailable} source(s) (check extractor model/quota); "
-fi
-
-# Confluence pages: format is "PROJECT_ID URL", one per line, "#"-prefixed
-# lines and blank lines ignored. Grouped by project_id so each project gets
-# one import-url call (one index rebuild) instead of one per URL. Add/remove
-# a page by editing this file — nothing else needs touching.
-if [ -f "$CONFLUENCE_URLS_FILE" ]; then
-  projects=$(awk 'NF && $1 !~ /^#/ {print $1}' "$CONFLUENCE_URLS_FILE" | sort -u)
-  for project_id in $projects; do
-    urls=$(awk -v p="$project_id" 'NF && $1 !~ /^#/ && $1 == p {print $2}' "$CONFLUENCE_URLS_FILE")
-    confluence_output=$(run_step "import Confluence pages ($project_id)" "$MEMENTO" import-url $urls --project-id "$project_id")
-    log_sync_run "confluence:$project_id" "$confluence_output"
-    count_problems "$confluence_output"
-  done
+# pending_retry alone looks self-healing, but a permanently broken engine
+# also lands there and retries forever. Say so the first night.
+if printf '%s' "$import_output" | grep -q 'Bifrost unavailable'; then
+  problems="${problems}Bifrost extraction failing (check the gateway, model, or quota); "
+elif printf '%s' "$import_output" | grep -q 'Cursor unavailable'; then
+  problems="${problems}Cursor extraction failing (check extractor model or quota); "
 fi
 
 stale_pending=$(find "$HOME/.local/share/memento/artifacts" -name job_status.json -mtime +2 2>/dev/null | wc -l | tr -d ' ')

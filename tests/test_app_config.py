@@ -78,6 +78,83 @@ def test_explicit_missing_config_is_an_error(tmp_path):
         load_app_config(tmp_path / "missing.toml")
 
 
+def test_omitted_sources_mean_claude_cursor_and_confluence(tmp_path):
+    config_path = tmp_path / "config.toml"
+    write_config(config_path)
+
+    config = load_app_config(config_path)
+    resolved = resolve_app_config(config, cwd=Path("/work/lvcore"), environ={})
+
+    assert config.sources is None
+    assert resolved.sources == ("claude", "cursor", "confluence")
+    assert resolved.bifrost_base_url is None
+    assert resolved.bifrost_model is None
+
+
+def test_sources_and_bifrost_settings_are_kept_when_cursor_is_selected(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+sources = ["markdown", "claude"]
+
+[extractor]
+provider = "cursor"
+mode = "ask"
+model = "cursor-model"
+
+[extractor.bifrost]
+base_url = "https://bifrost.example/openai"
+model = "bedrock/anthropic.claude"
+""".strip()
+        + "\n"
+    )
+
+    resolved = resolve_app_config(load_app_config(config_path), cwd=tmp_path, environ={})
+
+    assert resolved.extractor_provider == "cursor"
+    assert resolved.cursor_model == "cursor-model"
+    assert resolved.sources == ("markdown", "claude")
+    assert resolved.bifrost_base_url == "https://bifrost.example/openai"
+    assert resolved.bifrost_model == "bedrock/anthropic.claude"
+
+
+def test_empty_sources_imports_nothing(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("sources = []\n")
+
+    resolved = resolve_app_config(load_app_config(config_path), cwd=tmp_path, environ={})
+
+    assert resolved.sources == ()
+
+
+def test_extractor_env_rejects_an_unknown_provider(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("")
+
+    with pytest.raises(ConfigError, match="provider"):
+        resolve_app_config(
+            load_app_config(config_path),
+            cwd=tmp_path,
+            environ={"MEMENTO_EXTRACTOR": "openai"},
+        )
+
+
+@pytest.mark.parametrize(
+    ("text", "match"),
+    [
+        ("sources = [\"nope\"]\n", "unknown"),
+        ("sources = [\"claude\", \"claude\"]\n", "repeated"),
+        ("[extractor]\nprovider = \"openai\"\n", "provider"),
+    ],
+)
+def test_sources_and_provider_names_are_rejected(tmp_path, text, match):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(text)
+
+    with pytest.raises(ConfigError, match=match):
+        load_app_config(config_path)
+
+
 def test_current_directory_selects_the_most_specific_configured_project(tmp_path):
     config_path = tmp_path / "config.toml"
     config_path.write_text(

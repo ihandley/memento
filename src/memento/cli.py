@@ -11,12 +11,11 @@ from pathlib import Path
 
 from .app_config import ConfigError, ResolvedAppConfig, add_project, default_config_path, load_app_config, resolve_app_config
 from .artifacts import artifact_path, find_record, find_sources_by_project, forget_source, job_failures_for_project, load_active_episode_records, source_hash
-from .embeddings import FastEmbedder
+from .bifrost_client import complete_chat, resolve_api_key, urllib_transport
 from .deduplication import DEFAULT_SEMANTIC_DUPLICATE_THRESHOLD, reconcile_duplicates
 from .extractors import create_extractor
-from .extractors.cursor import CursorExtractor
 from .extractors.raw_knowledge import RawKnowledgeExtractor, raw_source_documents, raw_source_id
-from .extractors.base import KnowledgeExtractor, ProjectProvenance
+from .extractors.base import EngineConfigurationError, KnowledgeExtractor, ProjectProvenance
 from .hook import format_context, handle_user_prompt
 from .health import CursorHealthChecker, HealthChecker, deterministic_findings, grounded_findings, write_report
 from .markdown_kb import MarkdownKnowledgeBaseExtractor, markdown_articles, markdown_source_id
@@ -47,18 +46,66 @@ from .retrieval import purge_traces
 from .retrieval import search as retrieval_search
 from .store import Embedder, delete_by_source_id, index_episode_records
 from .session_sources import SessionSource, claude_sessions, confluence_url_sources, cursor_sessions, parse_since
-from .confluence import fetch_confluence_page
+from .configured_import import import_configured_sources
 from .secrets import KeychainSecretError, read_keychain_secret
 from .envconfig import env_value
 
 _CONFLUENCE_KEYCHAIN_SERVICE = "memento-atlassian-api-token"
 
 
-_NEXT_ACTION = {
+_NEXT_ACTIONS = {
     "blocked": "resolve the stated reason, then use --resume if the source is unchanged; use a normal import if it changes",
     "failed": "correct the extractor or input problem, then use --resume if the source is unchanged",
-    "pending_retry": "restore Cursor availability or quota, then run the same import with --resume",
 }
+
+
+def _engine_label(provider: str) -> str:
+    return "Bifrost" if provider == "bifrost" else "Cursor"
+
+
+def _next_action(status: str, provider: str) -> str:
+    if status == "pending_retry":
+        return f"restore {_engine_label(provider)} availability or quota, then run the same import with --resume"
+    return _NEXT_ACTIONS[status]
+
+
+def _bifrost_complete(resolved: ResolvedAppConfig, *, timeout: int | None = None):
+    if not resolved.bifrost_base_url:
+        raise EngineConfigurationError("extractor.bifrost.base_url is required when provider is bifrost")
+    if not resolved.bifrost_model:
+        raise EngineConfigurationError("extractor.bifrost.model is required when provider is bifrost")
+    base_url = resolved.bifrost_base_url
+    model = resolved.bifrost_model
+    call_timeout = resolved.timeout_seconds if timeout is None else timeout
+
+    def complete(prompt: str) -> dict:
+        api_key = resolve_api_key(None, base_url, read_keychain_secret)
+        return complete_chat(
+            prompt, base_url=base_url, model=model, api_key=api_key, timeout=call_timeout, transport=urllib_transport,
+        )
+
+    return complete
+
+
+def _extractor_kwargs(resolved: ResolvedAppConfig) -> dict:
+    return {
+        "cursor_mode": resolved.cursor_mode,
+        "cursor_model": resolved.cursor_model,
+        "bifrost_base_url": resolved.bifrost_base_url,
+        "bifrost_model": resolved.bifrost_model,
+        "max_sanitized_chars": resolved.max_sanitized_chars,
+        "timeout_seconds": resolved.timeout_seconds,
+        "operator_id": resolved.operator_id,
+    }
+
+
+def _knowledge_extractor(resolved: ResolvedAppConfig, extractor, **kwargs) -> RawKnowledgeExtractor:
+    if extractor is not None:
+        return extractor
+    if resolved.extractor_provider == "bifrost":
+        kwargs["complete"] = _bifrost_complete(resolved)
+        kwargs["model"] = resolved.bifrost_model
+    return RawKnowledgeExtractor(**kwargs)
 
 
 def _select_batch_candidates(
@@ -102,12 +149,20 @@ def _select_batch_candidates(
     return candidates, counts, attention_required
 
 
-def _run_batch_candidates(candidates, counts: dict, attention_required: list[dict], run_one) -> None:
+def _run_batch_candidates(candidates, counts: dict, attention_required: list[dict], run_one, *, provider: str) -> EngineConfigurationError | None:
     """Runs `run_one(source) -> ExtractionOutcome` over each candidate,
-    folding the result into `counts`/`attention_required` in place."""
+    folding the result into `counts`/`attention_required` in place.
+
+    An engine configuration failure stops the remaining sources and is
+    returned so the command can exit non-zero after reporting the counts
+    gathered so far.
+    """
 
     for source in candidates:
-        outcome = run_one(source)
+        try:
+            outcome = run_one(source)
+        except EngineConfigurationError as error:
+            return error
         counts[{"no_op": "unchanged"}.get(outcome.status, outcome.status)] += 1
         if outcome.status in {"blocked", "failed", "pending_retry"}:
             attention_required.append({
@@ -115,8 +170,9 @@ def _run_batch_candidates(candidates, counts: dict, attention_required: list[dic
                 "source_id": source.source_id,
                 "status": outcome.status,
                 "reason": outcome.reason,
-                "next_action": _NEXT_ACTION[outcome.status],
+                "next_action": _next_action(outcome.status, provider),
             })
+    return None
 
 
 def _add_record_command_args(subparser: argparse.ArgumentParser) -> None:
@@ -150,6 +206,7 @@ def _scope_from_args(args: argparse.Namespace, resolved: ResolvedAppConfig) -> R
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="memento")
     result.add_argument("--config", type=Path, help="TOML config path (default: ~/.config/memento/config.toml)")
+    result.add_argument("--extractor", choices=["cursor", "bifrost"], help="Override the configured engine for this run")
     commands = result.add_subparsers(dest="command", required=True)
     ingest = commands.add_parser("ingest")
     _add_storage_args(ingest)
@@ -164,7 +221,6 @@ def parser() -> argparse.ArgumentParser:
     extract = commands.add_parser("extract-session")
     extract.add_argument("transcript", type=Path)
     _add_storage_args(extract, database=False)
-    extract.add_argument("--extractor", choices=["cursor"])
     extract.add_argument("--cursor-mode", choices=["ask", "plan"])
     extract.add_argument("--cursor-model")
     extract.add_argument("--operator-id")
@@ -257,6 +313,11 @@ def parser() -> argparse.ArgumentParser:
     batch.add_argument("--resume", action="store_true", help="Retry only previously failed or blocked sessions")
     batch.add_argument("--cursor-database", type=Path)
     batch.add_argument("--timeout", dest="timeout_seconds", type=int, help="Seconds before a Cursor call times out")
+    configured = commands.add_parser("import-sources", help="Import every adapter named in sources")
+    configured.add_argument("--dry-run", action="store_true")
+    configured.add_argument("--since", help="Only sources updated on/after YYYY-MM-DD")
+    configured.add_argument("--resume", action="store_true", help="Retry only previously failed or blocked sources")
+    _add_storage_args(configured)
     report_cmd = commands.add_parser("report")
     report_cmd.add_argument("--artifacts", type=Path)
     report_cmd.add_argument("--json", action="store_true")
@@ -309,7 +370,12 @@ def _global_config_display(app_config, resolved: ResolvedAppConfig) -> dict:
             "model": resolved.cursor_model,
             "max_sanitized_chars": resolved.max_sanitized_chars,
             "timeout_seconds": resolved.timeout_seconds,
+            "bifrost": {
+                "base_url": resolved.bifrost_base_url,
+                "model": resolved.bifrost_model,
+            },
         },
+        "sources": list(resolved.sources),
         "projects": {
             project_id: {
                 "root": str(project.root),
@@ -433,7 +499,7 @@ def run(
         artifacts = _require(resolved.artifacts, "artifacts")
         database = (
             _require(resolved.database, "database")
-            if args.command in {"ingest", "search", "hook", "forget", "capture", "import-sessions", "eval"}
+            if args.command in {"ingest", "search", "hook", "forget", "capture", "import-sessions", "import-sources", "eval"}
             else resolved.database
         )
     except ConfigError as error:
@@ -454,18 +520,18 @@ def run(
             )
             selected_extractor = extractor or create_extractor(
                 resolved.extractor_provider,
-                cursor_mode=resolved.cursor_mode,
-                cursor_model=resolved.cursor_model,
-                max_sanitized_chars=resolved.max_sanitized_chars,
-                timeout_seconds=resolved.timeout_seconds,
-                operator_id=resolved.operator_id,
                 project=project,
+                **_extractor_kwargs(resolved),
             )
-        except (ConfigError, ValueError) as error:
+        except (ConfigError, ValueError, EngineConfigurationError) as error:
             print(f"configuration error: {error}", file=sys.stderr)
             return 3
 
-        outcome = run_extraction(selected_extractor, transcript, artifacts)
+        try:
+            outcome = run_extraction(selected_extractor, transcript, artifacts)
+        except EngineConfigurationError as error:
+            print(f"configuration error: {error}", file=sys.stderr)
+            return 3
         if outcome.status == "blocked":
             print(f"blocked: {outcome.reason}", file=sys.stderr)
             return 2
@@ -530,21 +596,25 @@ def run(
             sources = [source for source in sources if source.updated_at is None or source.updated_at >= cutoff]
 
         candidates, counts, attention_required = _select_batch_candidates(sources, artifacts, args.resume)
+        engine_error = None
         if not args.dry_run:
             def run_one(source: SessionSource):
                 project = ProjectProvenance(project_id=source.project_id, project_root=str(source.project_root)) if source.project_id else None
-                selected = extractor or CursorExtractor(
-                    mode=resolved.cursor_mode, model=resolved.cursor_model,
-                    max_sanitized_chars=resolved.max_sanitized_chars,
-                    timeout_seconds=resolved.timeout_seconds,
-                    operator_id=resolved.operator_id, project=project,
-                    source_type=source.source_type, source_id=source.source_id, source_uri=source.source_uri,
+                selected = extractor or create_extractor(
+                    resolved.extractor_provider,
+                    project=project,
+                    source_type=source.source_type,
+                    source_id=source.source_id,
+                    source_uri=source.source_uri,
+                    **_extractor_kwargs(resolved),
                 )
                 return run_extraction(
                     selected, source.path, artifacts,
                     source_type=source.source_type, source_id=source.source_id, source_uri=source.source_uri,
                 )
-            _run_batch_candidates(candidates, counts, attention_required, run_one)
+            engine_error = _run_batch_candidates(
+                candidates, counts, attention_required, run_one, provider=resolved.extractor_provider
+            )
             selected_embedder = embedder or FastEmbedder()
             counts["indexed"], counts["exact_duplicates"], counts["possible_duplicates"] = _index_active_records(
                 artifacts, database, selected_embedder
@@ -552,6 +622,33 @@ def run(
         print(json.dumps({**counts, "attention_required": attention_required}, indent=2))
         if cursor_temporary is not None:
             cursor_temporary.cleanup()
+        if engine_error is not None:
+            print(f"configuration error: {engine_error}", file=sys.stderr)
+            return 3
+    elif args.command == "import-sources":
+        try:
+            cutoff = parse_since(args.since)
+        except ValueError:
+            print("configuration error: --since must be an ISO date such as 2026-09-01", file=sys.stderr)
+            return 3
+        payload, status = import_configured_sources(
+            app_config,
+            resolved,
+            artifacts,
+            dry_run=args.dry_run,
+            resume=args.resume,
+            cutoff=cutoff,
+            extractor=extractor,
+            url_fetcher=url_fetcher,
+        )
+        if not args.dry_run:
+            selected_embedder = embedder or FastEmbedder()
+            indexed, exact, possible = _index_active_records(artifacts, database, selected_embedder)
+            payload["indexed"] = indexed
+            payload["exact_duplicates"] = exact
+            payload["possible_duplicates"] = possible
+        print(json.dumps(payload, indent=2))
+        return status
     elif args.command == "import-markdown-kb":
         wiki_dir = args.wiki_dir or resolved.knowledge_base
         project_id = args.project_id or resolved.project_id
@@ -612,18 +709,18 @@ def run(
             )
             selected_extractor = extractor or create_extractor(
                 resolved.extractor_provider,
-                cursor_mode=resolved.cursor_mode,
-                cursor_model=resolved.cursor_model,
-                max_sanitized_chars=resolved.max_sanitized_chars,
-                timeout_seconds=resolved.timeout_seconds,
-                operator_id=resolved.operator_id,
                 project=project,
+                **_extractor_kwargs(resolved),
             )
-        except ValueError as error:
+        except (ConfigError, ValueError, EngineConfigurationError) as error:
             print(f"configuration error: {error}", file=sys.stderr)
             return 3
 
-        outcome = run_extraction(selected_extractor, args.transcript, artifacts)
+        try:
+            outcome = run_extraction(selected_extractor, args.transcript, artifacts)
+        except EngineConfigurationError as error:
+            print(f"configuration error: {error}", file=sys.stderr)
+            return 3
 
         if outcome.status == "blocked":
             print(f"blocked: {outcome.reason}", file=sys.stderr)
@@ -658,7 +755,9 @@ def run(
                 if resolved.project_id
                 else None
             )
-            raw_extractor = extractor or RawKnowledgeExtractor(
+            raw_extractor = extractor or _knowledge_extractor(
+                resolved,
+                None,
                 mode=resolved.cursor_mode,
                 model=resolved.cursor_model,
                 max_sanitized_chars=resolved.max_sanitized_chars,
@@ -666,11 +765,15 @@ def run(
                 operator_id=resolved.operator_id,
                 project=project,
             )
-        except ValueError as error:
+        except (ValueError, EngineConfigurationError) as error:
             print(f"configuration error: {error}", file=sys.stderr)
             return 3
 
-        outcome = run_extraction(raw_extractor, args.document, artifacts, source_type="raw_knowledge_source")
+        try:
+            outcome = run_extraction(raw_extractor, args.document, artifacts, source_type="raw_knowledge_source")
+        except EngineConfigurationError as error:
+            print(f"configuration error: {error}", file=sys.stderr)
+            return 3
 
         if outcome.status == "blocked":
             print(f"blocked: {outcome.reason}", file=sys.stderr)
@@ -721,9 +824,12 @@ def run(
         ]
 
         candidates, counts, attention_required = _select_batch_candidates(sources, artifacts, args.resume)
+        engine_error = None
         if not args.dry_run:
             try:
-                raw_extractor = extractor or RawKnowledgeExtractor(
+                raw_extractor = extractor or _knowledge_extractor(
+                    resolved,
+                    None,
                     mode=args.cursor_mode or resolved.cursor_mode,
                     model=args.cursor_model or resolved.cursor_model,
                     max_sanitized_chars=args.max_sanitized_chars or resolved.max_sanitized_chars,
@@ -731,7 +837,7 @@ def run(
                     operator_id=args.operator_id or resolved.operator_id,
                     project=ProjectProvenance(project_id=project_id, project_root=project_root),
                 )
-            except ValueError as error:
+            except (ValueError, EngineConfigurationError) as error:
                 print(f"configuration error: {error}", file=sys.stderr)
                 return 3
 
@@ -740,12 +846,17 @@ def run(
                     raw_extractor, source.path, artifacts,
                     source_type=source.source_type, source_id=source.source_id,
                 )
-            _run_batch_candidates(candidates, counts, attention_required, run_one)
+            engine_error = _run_batch_candidates(
+                candidates, counts, attention_required, run_one, provider=resolved.extractor_provider
+            )
             selected_embedder = embedder or FastEmbedder()
             counts["indexed"], counts["exact_duplicates"], counts["possible_duplicates"] = _index_active_records(
                 artifacts, database, selected_embedder
             )
         print(json.dumps({**counts, "attention_required": attention_required}, indent=2))
+        if engine_error is not None:
+            print(f"configuration error: {engine_error}", file=sys.stderr)
+            return 3
     elif args.command == "import-url":
         project_id = args.project_id or resolved.project_id
         project_id = _require(project_id, "project_id")
@@ -768,6 +879,7 @@ def run(
             fetch=url_fetcher or fetch_confluence_page,
         )
         candidates, counts, attention_required = _select_batch_candidates(sources, artifacts, args.resume)
+        engine_error = None
         for failure in fetch_failures:
             counts["failed"] += 1
             attention_required.append({
@@ -779,7 +891,9 @@ def run(
             })
         if not args.dry_run:
             try:
-                confluence_extractor = extractor or RawKnowledgeExtractor(
+                confluence_extractor = extractor or _knowledge_extractor(
+                    resolved,
+                    None,
                     mode=args.cursor_mode or resolved.cursor_mode,
                     model=args.cursor_model or resolved.cursor_model,
                     max_sanitized_chars=args.max_sanitized_chars or resolved.max_sanitized_chars,
@@ -788,7 +902,7 @@ def run(
                     project=ProjectProvenance(project_id=project_id, project_root=project_root),
                     source_type="confluence_page",
                 )
-            except ValueError as error:
+            except (ValueError, EngineConfigurationError) as error:
                 print(f"configuration error: {error}", file=sys.stderr)
                 return 3
 
@@ -797,13 +911,18 @@ def run(
                     confluence_extractor, source.path, artifacts,
                     source_type=source.source_type, source_id=source.source_id, source_uri=source.source_uri,
                 )
-            _run_batch_candidates(candidates, counts, attention_required, run_one)
+            engine_error = _run_batch_candidates(
+                candidates, counts, attention_required, run_one, provider=resolved.extractor_provider
+            )
             selected_embedder = embedder or FastEmbedder()
             counts["indexed"], counts["exact_duplicates"], counts["possible_duplicates"] = _index_active_records(
                 artifacts, database, selected_embedder
             )
         print(json.dumps({**counts, "attention_required": attention_required}, indent=2))
         url_temporary.cleanup()
+        if engine_error is not None:
+            print(f"configuration error: {engine_error}", file=sys.stderr)
+            return 3
     elif args.command == "search":
         selected_embedder = embedder or FastEmbedder()
         results, _trace = retrieval_search(
@@ -885,10 +1004,20 @@ def run(
         ai_status = "not_requested"
         if args.ai or health_checker is not None:
             sensitive_paths = (str(configured_project.root),) if configured_project else ()
-            checker = health_checker or CursorHealthChecker(
-                mode=resolved.cursor_mode, model=resolved.cursor_model, sensitive_paths=sensitive_paths
-            )
             try:
+                if health_checker is not None:
+                    checker = health_checker
+                elif resolved.extractor_provider == "bifrost":
+                    checker = CursorHealthChecker(
+                        mode=resolved.cursor_mode,
+                        model=resolved.bifrost_model or "",
+                        sensitive_paths=sensitive_paths,
+                        complete=_bifrost_complete(resolved, timeout=180),
+                    )
+                else:
+                    checker = CursorHealthChecker(
+                        mode=resolved.cursor_mode, model=resolved.cursor_model, sensitive_paths=sensitive_paths,
+                    )
                 proposed = checker.analyze(args.project_id, project_records)
                 findings.extend(grounded_findings(proposed, {record["id"] for record in project_records}))
                 ai_status = "completed"
