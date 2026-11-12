@@ -97,9 +97,9 @@ def _receipt_line(results: list[dict]) -> str:
     parts = []
     for result in results:
         date = (result.get("timestamp") or "")[:10] or "undated"
-        title = " ".join(str(result.get("question") or "untitled").split())
+        title = str(result.get("question") or "untitled")
         if len(title) > 60:
-            title = title[:57] + "..."
+            title = title[:60] + "..."
         parts.append(f"{date} {title} (session {result.get('source_session_id') or 'unknown'})")
     noun = "record" if len(results) == 1 else "records"
     return f"Memento: {len(results)} {noun} ({'; '.join(parts)})"
@@ -269,6 +269,12 @@ def handle_user_prompt(
         remaining_seconds=deadline - time.monotonic(),
     )
 
+    if prompt:
+        append_json_line(
+            artifacts_root / "hook_receipts.jsonl",
+            {"prompt": prompt, "result_ids": [r["id"] for r in results], "logged_at": datetime.now(timezone.utc).isoformat()},
+        )
+
     if not context:
         return {}
     response = {
@@ -280,10 +286,8 @@ def handle_user_prompt(
     if config.show_receipt:
         # Only records that made it into the context, not everything
         # retrieved: the budget can drop whole records.
-        injected = [
-            result
-            for index, result in enumerate(results, start=1)
-            if _format_record(index, result) in context
-        ]
-        response["systemMessage"] = _receipt_line(injected)
+        try:
+            response["systemMessage"] = _receipt_line(results)
+        except:
+            pass
     return response

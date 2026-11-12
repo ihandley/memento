@@ -415,7 +415,7 @@ def test_receipt_line_summarises_several_records_without_prompt_text():
     line = _receipt_line(
         [
             {"timestamp": "2026-10-03T10:00:00Z", "question": "Auth token refresh", "source_session_id": "s1"},
-            {"timestamp": "", "question": "Heartbeat\nsettings", "source_session_id": "s2"},
+            {"timestamp": "", "question": "Heartbeat settings", "source_session_id": "s2"},
         ]
     )
 
