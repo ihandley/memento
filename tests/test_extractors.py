@@ -601,6 +601,33 @@ def test_cursor_extractor_blocks_oversized_sanitized_session(tmp_path):
     assert "50" in excinfo.value.reason
 
 
+def test_cursor_extractor_chunks_an_oversized_session_and_keeps_the_source(tmp_path):
+    transcript = tmp_path / "claude-session-big.jsonl"
+    transcript.write_text(
+        "\n".join(
+            json.dumps({"type": "user", "uuid": f"u{i}", "message": {"content": "a" * 100}})
+            for i in range(1, 5)
+        )
+        + "\n"
+    )
+    prompts: list[str] = []
+
+    def runner(command, **kwargs):
+        prompts.append(kwargs["input"])
+        n = len(prompts)
+        return cursor_response(
+            {"records": [{"question": f"q{n}", "summary": f"s{n}", "evidence_location": f"u{2 * n - 1}"}]}
+        )
+
+    records = CursorExtractor(runner=runner, max_sanitized_chars=300).extract(transcript)
+
+    assert len(prompts) == 2
+    assert [record.question for record in records] == ["q1", "q2"]
+    assert {record.source_session_id for record in records} == {"claude-session-big"}
+    assert {record.source for record in records} == {str(transcript.resolve())}
+    assert [record.evidence_location.identifier for record in records] == ["u1", "u3"]
+
+
 def test_explicit_cursor_configuration_overrides_environment(tmp_path, monkeypatch):
     transcript = tmp_path / "session.jsonl"
     write_transcript(transcript)

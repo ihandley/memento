@@ -74,8 +74,8 @@ class SanitizationBudgetExceeded(RuntimeError):
         self.limit = limit
         super().__init__(
             f"Sanitized session is {size} characters, exceeding the {limit}-character limit. "
-            "Extraction was not attempted rather than silently truncated; reduce the session size "
-            "or raise the configured maximum."
+            "Extraction was not attempted rather than silently truncated; raise the configured "
+            "maximum (a single turn that large cannot be split)."
         )
 
 
@@ -237,6 +237,60 @@ def sanitize_session(
     than silently truncating when the result is still too large.
     """
 
+    sanitized = _render_session(
+        path, sensitive_paths=sensitive_paths, tool_output_limit=tool_output_limit
+    )
+    if len(sanitized.prompt_text) > max_chars:
+        raise SanitizationBudgetExceeded(len(sanitized.prompt_text), max_chars)
+    return sanitized
+
+
+def sanitize_session_chunks(
+    path: Path,
+    *,
+    sensitive_paths: tuple[str, ...] = (),
+    max_chars: int = DEFAULT_MAX_SANITIZED_CHARS,
+    tool_output_limit: int = MAX_TOOL_OUTPUT_CHARS,
+) -> list[SanitizedSession]:
+    """Like sanitize_session, but a session over max_chars is split into
+    consecutive chunks that each fit, cut only on entry boundaries so every
+    entry keeps its stable identifier and appears in exactly one chunk.
+
+    Still raises SanitizationBudgetExceeded when one entry alone exceeds the
+    limit: an entry is never cut mid-text, so nothing is silently truncated.
+    """
+
+    sanitized = _render_session(
+        path, sensitive_paths=sensitive_paths, tool_output_limit=tool_output_limit
+    )
+    if len(sanitized.prompt_text) <= max_chars:
+        return [sanitized]
+
+    chunks: list[SanitizedSession] = []
+    current: list[SanitizedEntry] = []
+    current_size = 0
+    for entry in sanitized.entries:
+        entry_size = len(SanitizedSession(entries=[entry]).prompt_text)
+        if entry_size > max_chars:
+            raise SanitizationBudgetExceeded(entry_size, max_chars)
+        # +1 for the newline prompt_text puts between entries.
+        added = entry_size + (1 if current else 0)
+        if current and current_size + added > max_chars:
+            chunks.append(SanitizedSession(entries=current))
+            current, current_size, added = [], 0, entry_size
+        current.append(entry)
+        current_size += added
+    if current:
+        chunks.append(SanitizedSession(entries=current))
+    return chunks
+
+
+def _render_session(
+    path: Path,
+    *,
+    sensitive_paths: tuple[str, ...],
+    tool_output_limit: int,
+) -> SanitizedSession:
     entries: list[SanitizedEntry] = []
     tool_uses: dict[str, dict] = {}
     for raw_index, raw_line in enumerate(path.read_text(errors="replace").splitlines()):
@@ -259,7 +313,4 @@ def sanitize_session(
         text = redact_secrets(f"{_speaker(record)}: {rendered_text}", sensitive_paths=sensitive_paths)
         entries.append(SanitizedEntry(identifier=_entry_identifier(record, raw_index), text=text))
 
-    sanitized = SanitizedSession(entries=entries)
-    if len(sanitized.prompt_text) > max_chars:
-        raise SanitizationBudgetExceeded(len(sanitized.prompt_text), max_chars)
-    return sanitized
+    return SanitizedSession(entries=entries)
