@@ -345,7 +345,9 @@ active revision remains searchable. Start with the matching
 `attention_required` item in the import output—it names the source and preserves
 the exact reason.
 
-For a session exceeding `extractor.max_sanitized_chars`:
+A session exceeding `extractor.max_sanitized_chars` is split on turn boundaries
+and extracted chunk by chunk, so it is no longer blocked. Only a single turn
+larger than the limit still blocks. For that case:
 
 1. Decide whether the source is worth the additional extraction context and
    Cursor quota. Do not raise the limit automatically.

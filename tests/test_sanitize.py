@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from memento.sanitize import SanitizationBudgetExceeded, redact_secrets, sanitize_session
+from memento.sanitize import SanitizationBudgetExceeded, redact_secrets, sanitize_session, sanitize_session_chunks
 
 
 @pytest.mark.parametrize(
@@ -271,3 +271,43 @@ def test_sanitize_session_skipped_records_do_not_shift_later_identifiers(tmp_pat
 
     assert [entry.identifier for entry in sanitized.entries] == ["line-0", "line-3"]
     assert sanitized.text_for("line-3") == "User: fourth"
+
+
+def test_sanitize_session_chunks_returns_one_chunk_when_it_fits(tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    write_lines(transcript, [{"type": "user", "uuid": "u1", "message": {"content": "hello"}}])
+
+    chunks = sanitize_session_chunks(transcript, max_chars=1000)
+
+    assert [[entry.identifier for entry in chunk.entries] for chunk in chunks] == [["u1"]]
+
+
+def test_sanitize_session_chunks_splits_on_entry_boundaries_within_the_limit(tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    write_lines(
+        transcript,
+        [{"type": "user", "uuid": f"u{i}", "message": {"content": "a" * 40}} for i in range(1, 6)],
+    )
+
+    chunks = sanitize_session_chunks(transcript, max_chars=120)
+
+    assert len(chunks) > 1
+    assert all(len(chunk.prompt_text) <= 120 for chunk in chunks)
+    # Every entry lands in exactly one chunk, in order, with its identifier intact.
+    assert [entry.identifier for chunk in chunks for entry in chunk.entries] == ["u1", "u2", "u3", "u4", "u5"]
+
+
+def test_sanitize_session_chunks_still_raises_for_a_single_oversized_entry(tmp_path):
+    transcript = tmp_path / "session.jsonl"
+    write_lines(
+        transcript,
+        [
+            {"type": "user", "uuid": "u1", "message": {"content": "short"}},
+            {"type": "user", "uuid": "u2", "message": {"content": "a" * 1000}},
+        ],
+    )
+
+    with pytest.raises(SanitizationBudgetExceeded) as excinfo:
+        sanitize_session_chunks(transcript, max_chars=100)
+
+    assert "100" in str(excinfo.value)

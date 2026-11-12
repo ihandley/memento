@@ -17,7 +17,7 @@ from .base import (
     ProjectProvenance,
     StructuredRecord,
 )
-from ..sanitize import DEFAULT_MAX_SANITIZED_CHARS, SanitizationBudgetExceeded, SanitizedSession, sanitize_session
+from ..sanitize import DEFAULT_MAX_SANITIZED_CHARS, SanitizationBudgetExceeded, SanitizedSession, sanitize_session_chunks
 from ..envconfig import env_value
 from .cursor_runner import DEFAULT_TIMEOUT_SECONDS, run_extraction_with_retries
 
@@ -150,22 +150,28 @@ class CursorExtractor:
 
     def extract(self, transcript: Path) -> list[StructuredRecord]:
         try:
-            sanitized = sanitize_session(
+            chunks = sanitize_session_chunks(
                 transcript,
                 sensitive_paths=self._sensitive_paths,
                 max_chars=self._max_sanitized_chars,
             )
         except SanitizationBudgetExceeded as error:
             raise ExtractionBlocked(str(error)) from error
-        prompt = self._prompt(sanitized.prompt_text)
-        drafts = self._run_with_retries(prompt)
+        # A session over the limit is extracted chunk by chunk; every record
+        # keeps the same source citation and its evidence resolves against
+        # the chunk it came from.
+        drafts = [
+            (draft, chunk)
+            for chunk in chunks
+            for draft in self._run_with_retries(self._prompt(chunk.prompt_text))
+        ]
         try:
             return [
                 StructuredRecord(
                     **{
                         **draft.model_dump(),
                         "attribution": _person_attribution(draft.attribution),
-                        "evidence_location": _resolved_evidence_location(draft.evidence_location, sanitized),
+                        "evidence_location": _resolved_evidence_location(draft.evidence_location, chunk),
                     },
                     source=self._source_uri or str(transcript.resolve()),
                     source_session_id=self._source_id or transcript.stem,
@@ -174,7 +180,7 @@ class CursorExtractor:
                     project=self._project,
                     prompt_version=self._prompt_version,
                 )
-                for draft in drafts
+                for draft, chunk in drafts
             ]
         except ValidationError as error:
             # Cursor has already returned at this point, so this is not a

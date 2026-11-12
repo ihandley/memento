@@ -31,7 +31,7 @@ from .cursor import (
     _resolved_evidence_location,
 )
 from .cursor_runner import DEFAULT_TIMEOUT_SECONDS
-from ..sanitize import DEFAULT_MAX_SANITIZED_CHARS, SanitizationBudgetExceeded, sanitize_session
+from ..sanitize import DEFAULT_MAX_SANITIZED_CHARS, SanitizationBudgetExceeded, sanitize_session_chunks
 
 
 def run_bifrost_with_retries(
@@ -129,24 +129,29 @@ class BifrostExtractor:
     def extract(self, transcript: Path) -> list[StructuredRecord]:
         self._require_endpoint()
         try:
-            sanitized = sanitize_session(
+            chunks = sanitize_session_chunks(
                 transcript,
                 sensitive_paths=self._sensitive_paths,
                 max_chars=self._max_sanitized_chars,
             )
         except SanitizationBudgetExceeded as error:
             raise ExtractionBlocked(str(error)) from error
-        prompt = CursorExtractor._prompt(sanitized.prompt_text)
-        drafts = run_bifrost_with_retries(
-            prompt, complete=self._complete, max_output_retries=self._max_output_retries
-        )
+        drafts = [
+            (draft, chunk)
+            for chunk in chunks
+            for draft in run_bifrost_with_retries(
+                CursorExtractor._prompt(chunk.prompt_text),
+                complete=self._complete,
+                max_output_retries=self._max_output_retries,
+            )
+        ]
         try:
             return [
                 StructuredRecord(
                     **{
                         **draft.model_dump(),
                         "attribution": _person_attribution(draft.attribution),
-                        "evidence_location": _resolved_evidence_location(draft.evidence_location, sanitized),
+                        "evidence_location": _resolved_evidence_location(draft.evidence_location, chunk),
                     },
                     source=self._source_uri or str(transcript.resolve()),
                     source_session_id=self._source_id or transcript.stem,
@@ -155,7 +160,7 @@ class BifrostExtractor:
                     project=self._project,
                     prompt_version=self._prompt_version,
                 )
-                for draft in drafts
+                for draft, chunk in drafts
             ]
         except ValidationError as error:
             raise ExtractionError(f"Extracted record failed trusted provenance validation: {error}") from error
