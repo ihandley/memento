@@ -1,5 +1,3 @@
-import json
-from datetime import datetime
 
 import pytest
 
@@ -10,7 +8,7 @@ import memento.hook as hook
     ('question', 'title'),
     [(None, 'untitled'), ('', 'untitled'), (' \n\t ', 'untitled'),
      ('  First\nsecond\r\n third\t word  ', 'First second third word'),
-     ('word \n' * 20, (' '.join(['word'] * 20))[:60] + '...')],
+     ('word \n' * 20, (' '.join(['word'] * 20))[:57] + '...')],
 )
 def test_receipt_normalizes_title_before_truncating(question, title):
     assert hook._receipt_line([{'question': question}]) == (
@@ -35,12 +33,10 @@ def test_receipts_only_include_injected_records(tmp_path, monkeypatch, budget_ki
         tmp_path / 'db', tmp_path, embedder=object(),
         config=hook.HookConfig(max_injected_tokens=budget),
     )
-    log_text = (tmp_path / 'hook_receipts.jsonl').read_text()
-    receipt = json.loads(log_text)
-    assert set(receipt) == {'result_ids', 'logged_at'}
-    assert receipt['result_ids'] == [r['id'] for r in expected]
-    assert 'private prompt sentinel' not in log_text
-    assert datetime.fromisoformat(receipt['logged_at']).tzinfo is not None
+    # Nothing extra is persisted: the prompt must not land in any file.
+    assert not (tmp_path / 'hook_receipts.jsonl').exists()
+    for written in tmp_path.glob('*.jsonl'):
+        assert 'private prompt sentinel' not in written.read_text()
     # Retrieval metrics continue to count all search results.
     assert json.loads((tmp_path / 'hook_metrics.jsonl').read_text())['result_count'] == 2
     if expected:
@@ -54,32 +50,7 @@ def test_receipts_only_include_injected_records(tmp_path, monkeypatch, budget_ki
         assert response == {}
 
 
-def test_receipt_write_oserror_preserves_response(tmp_path, monkeypatch):
-    records = [_record('one', 'short')]
-    monkeypatch.setattr(hook, 'search', lambda *args: (records, {}))
-    real_append = hook.append_json_line
-
-    def append(path, data):
-        if path.name == 'hook_receipts.jsonl':
-            raise OSError('disk full')
-        real_append(path, data)
-
-    monkeypatch.setattr(hook, 'append_json_line', append)
-    response = hook.handle_user_prompt(
-        {'hook_event_name': 'UserPromptSubmit', 'prompt': 'private prompt'},
-        tmp_path / 'db', tmp_path, embedder=object(),
-    )
-    assert response['hookSpecificOutput']['additionalContext'] == hook.format_context(records)
-    assert response['systemMessage'] == hook._receipt_line(records)
-
-
-@pytest.mark.parametrize('prompt', ['', '   ', 'nonempty'])
-def test_receipt_keeps_existing_prompt_condition_for_other_events(tmp_path, prompt):
-    assert hook.handle_user_prompt(
-        {'hook_event_name': 'OtherEvent', 'prompt': prompt},
-        tmp_path / 'db', tmp_path, embedder=object(),
-    ) == {}
-    path = tmp_path / 'hook_receipts.jsonl'
-    assert path.exists() == bool(prompt.strip())
-    if path.exists():
-        assert json.loads(path.read_text())['result_ids'] == []
+def test_receipt_is_never_longer_than_its_title_cap():
+    line = hook._receipt_line([{'question': 'x' * 200}])
+    title = line.split('(undated ', 1)[1].split(' (session', 1)[0]
+    assert len(title) == 60 and title.endswith('...')
