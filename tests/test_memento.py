@@ -357,6 +357,71 @@ def test_user_prompt_hook_returns_additional_context(tmp_path):
     assert "session-123" in context
 
 
+def _hook_with_one_record(tmp_path, config):
+    transcript = tmp_path / "session-123.jsonl"
+    artifacts_dir = tmp_path / "artifacts"
+    database = tmp_path / "memory.lance"
+    _extract_and_activate(
+        artifacts_dir,
+        transcript,
+        "why did rabbitmq reconnect",
+        question="Why did RabbitMQ reconnect?",
+        summary="The heartbeat timeout caused the reconnect.",
+    )
+    embedder = KeywordEmbedder()
+    run(["ingest", "--artifacts", str(artifacts_dir), "--database", str(database)], embedder)
+    return handle_user_prompt(
+        {"hook_event_name": "UserPromptSubmit", "prompt": "What caused RabbitMQ to reconnect?"},
+        database,
+        artifacts_dir,
+        embedder,
+        scope=RetrievalScope(global_scope=True),
+        config=config,
+    )
+
+
+def test_hook_receipt_names_the_injected_record_on_one_line(tmp_path):
+    response = _hook_with_one_record(tmp_path, HookConfig())
+
+    receipt = response["systemMessage"]
+    assert receipt.startswith("Memento: 1 record (")
+    assert "Why did RabbitMQ reconnect?" in receipt
+    assert "session-123" in receipt
+    assert "\n" not in receipt
+
+
+def test_hook_receipt_is_off_when_disabled(tmp_path):
+    response = _hook_with_one_record(tmp_path, HookConfig(show_receipt=0))
+
+    assert "systemMessage" not in response
+    assert response["hookSpecificOutput"]["additionalContext"]
+
+
+def test_hook_has_no_receipt_when_nothing_is_injected(tmp_path):
+    response = handle_user_prompt(
+        {"hook_event_name": "UserPromptSubmit", "prompt": "anything"},
+        tmp_path / "missing.lance",
+        tmp_path / "artifacts",
+        KeywordEmbedder(),
+        scope=RetrievalScope(global_scope=True),
+    )
+
+    assert response == {}
+
+
+def test_receipt_line_summarises_several_records_without_prompt_text():
+    from memento.hook import _receipt_line
+
+    line = _receipt_line(
+        [
+            {"timestamp": "2026-10-03T10:00:00Z", "question": "Auth token refresh", "source_session_id": "s1"},
+            {"timestamp": "", "question": "Heartbeat\nsettings", "source_session_id": "s2"},
+        ]
+    )
+
+    assert line == "Memento: 2 records (2026-10-03 Auth token refresh (session s1); undated Heartbeat settings (session s2))"
+
+
 def test_cli_ingest_rebuilds_index_from_artifacts_alone_no_reextraction(tmp_path, capsys):
     transcript = tmp_path / "session-123.jsonl"
     artifacts_dir = tmp_path / "artifacts"

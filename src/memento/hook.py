@@ -24,6 +24,9 @@ class HookConfig:
     retrieval_timeout_ms: int = 500
     max_injected_tokens: int = 1000
     max_injected_records: int = 3
+    # 1 shows a one-line receipt of what was injected, 0 turns it off
+    # (MEMENTO_SHOW_RECEIPT). An int because config_from_env parses int/float.
+    show_receipt: int = 1
 
     @classmethod
     def from_env(cls) -> "HookConfig":
@@ -85,6 +88,21 @@ def _build_context_within_budget(results: list[dict], max_tokens: int) -> str | 
     if included == 0:
         return None
     return "\n\n".join(sections)
+
+
+def _receipt_line(results: list[dict]) -> str:
+    """One line naming each injected record: date, title, source session.
+    Built only from the records themselves, never the prompt or query."""
+
+    parts = []
+    for result in results:
+        date = (result.get("timestamp") or "")[:10] or "undated"
+        title = " ".join(str(result.get("question") or "untitled").split())
+        if len(title) > 60:
+            title = title[:57] + "..."
+        parts.append(f"{date} {title} (session {result.get('source_session_id') or 'unknown'})")
+    noun = "record" if len(results) == 1 else "records"
+    return f"Memento: {len(results)} {noun} ({'; '.join(parts)})"
 
 
 class _RetrievalTimeout(Exception):
@@ -253,9 +271,19 @@ def handle_user_prompt(
 
     if not context:
         return {}
-    return {
+    response = {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": context,
         }
     }
+    if config.show_receipt:
+        # Only records that made it into the context, not everything
+        # retrieved: the budget can drop whole records.
+        injected = [
+            result
+            for index, result in enumerate(results, start=1)
+            if _format_record(index, result) in context
+        ]
+        response["systemMessage"] = _receipt_line(injected)
+    return response
