@@ -70,13 +70,13 @@ def format_context(results: list[dict]) -> str:
     return "\n\n".join(sections)
 
 
-def _build_context_within_budget(results: list[dict], max_tokens: int) -> str | None:
+def _build_context_within_budget(results: list[dict], max_tokens: int) -> tuple[str | None, list[dict]]:
     """Whole records only — never truncated mid-citation/mid-field. A
     record that alone would exceed the remaining budget is omitted, not cut."""
 
     sections = [_INTRO]
     used = _estimate_tokens(_INTRO)
-    included = 0
+    included: list[dict] = []
     for index, result in enumerate(results, start=1):
         section = _format_record(index, result)
         cost = _estimate_tokens(section)
@@ -84,10 +84,10 @@ def _build_context_within_budget(results: list[dict], max_tokens: int) -> str | 
             continue
         sections.append(section)
         used += cost
-        included += 1
-    if included == 0:
-        return None
-    return "\n\n".join(sections)
+        included.append(result)
+    if not included:
+        return None, []
+    return "\n\n".join(sections), included
 
 
 def _receipt_line(results: list[dict]) -> str:
@@ -97,7 +97,7 @@ def _receipt_line(results: list[dict]) -> str:
     parts = []
     for result in results:
         date = (result.get("timestamp") or "")[:10] or "undated"
-        title = str(result.get("question") or "untitled")
+        title = " ".join(str(result.get("question") or "").split()) or "untitled"
         if len(title) > 60:
             title = title[:60] + "..."
         parts.append(f"{date} {title} (session {result.get('source_session_id') or 'unknown'})")
@@ -148,7 +148,7 @@ def _build_embedder_search_and_format(
     config: RetrievalConfig,
     scope: RetrievalScope | None,
     max_injected_tokens: int,
-) -> tuple[list[dict], str | None]:
+) -> tuple[list[dict], str | None, list[dict]]:
     """Constructs the embedder, searches, and formats the injected context as
     one unit inside the same timed daemon thread (see _run_with_timeout) —
     retrieval_timeout_ms must bound embedder initialization, query embedding,
@@ -156,8 +156,8 @@ def _build_embedder_search_and_format(
 
     embedder = embedder_factory()
     results, _trace = search(database, artifacts_root, query, embedder, config, scope)
-    context = _build_context_within_budget(results, max_injected_tokens) if results else None
-    return results, context
+    context, included = _build_context_within_budget(results, max_injected_tokens)
+    return results, context, included
 
 
 def _record_metric(artifacts_root: Path, *, latency_ms: float, outcome: str, result_count: int) -> None:
@@ -233,6 +233,7 @@ def handle_user_prompt(
     deadline = started + config.retrieval_timeout_ms / 1000
     prompt = event.get("prompt", "").strip()
     results: list[dict] = []
+    included: list[dict] = []
     context: str | None = None
     outcome = "ok"
 
@@ -244,7 +245,7 @@ def handle_user_prompt(
         # back to dataclass defaults every hook call.
         retrieval_config = replace(RetrievalConfig.from_env(), max_results=config.max_injected_records)
         try:
-            results, context = _run_with_timeout(
+            results, context, included = _run_with_timeout(
                 config.retrieval_timeout_ms / 1000,
                 _build_embedder_search_and_format,
                 resolved_factory,
@@ -270,10 +271,13 @@ def handle_user_prompt(
     )
 
     if prompt:
-        append_json_line(
-            artifacts_root / "hook_receipts.jsonl",
-            {"prompt": prompt, "result_ids": [r["id"] for r in results], "logged_at": datetime.now(timezone.utc).isoformat()},
-        )
+        try:
+            append_json_line(
+                artifacts_root / "hook_receipts.jsonl",
+                {"result_ids": [r["id"] for r in included], "logged_at": datetime.now(timezone.utc).isoformat()},
+            )
+        except OSError:
+            pass
 
     if not context:
         return {}
@@ -287,7 +291,7 @@ def handle_user_prompt(
         # Only records that made it into the context, not everything
         # retrieved: the budget can drop whole records.
         try:
-            response["systemMessage"] = _receipt_line(results)
+            response["systemMessage"] = _receipt_line(included)
         except:
             pass
     return response
