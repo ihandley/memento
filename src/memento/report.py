@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .artifacts import find_record, load_active_episode_records
-from .hook import METRICS_LOG_NAME
+from .hook import INJECTIONS_LOG_NAME, METRICS_LOG_NAME
 from .jsonio import read_json
 from .overlay import overlay_path
 from .retrieval import TRACE_LOG_NAME
@@ -187,6 +187,52 @@ def never_retrieved(artifacts_root: Path, *, min_age_days: int = 14, now: dateti
             "extracted_at": record.get("extracted_at"),
         })
     return stale
+
+
+def digest(artifacts_root: Path, *, days: int = 7, now: datetime | None = None) -> list[dict]:
+    """Records injected in the last `days` days that came from a different
+    session than the one they were injected into ("you already solved this").
+    Built from hook_injections.jsonl (ids and session ids only, never prompt
+    text) joined to the records themselves."""
+
+    now = now or datetime.now(timezone.utc)
+    injections = _since(_read_jsonl(artifacts_root / INJECTIONS_LOG_NAME), "logged_at", now - timedelta(days=days))
+    counts: Counter[str] = Counter()
+    for injection in injections:
+        for record_id in set(injection.get("record_ids") or []):
+            counts[(record_id, injection.get("session_id"))] += 1
+    per_record: Counter[str] = Counter()
+    records: dict[str, dict | None] = {}
+    for (record_id, session_id), count in counts.items():
+        if record_id not in records:
+            records[record_id] = find_record(artifacts_root, record_id)
+        record = records[record_id]
+        if record is None or record.get("source_session_id") == session_id:
+            continue
+        per_record[record_id] += count
+    entries = [
+        {
+            "record_id": record_id,
+            "title": " ".join(str(records[record_id].get("question") or "").split()) or "untitled",
+            "original_date": (records[record_id].get("timestamp") or "")[:10] or "undated",
+            "source_session_id": records[record_id].get("source_session_id") or "unknown",
+            "injections": count,
+        }
+        for record_id, count in per_record.items()
+    ]
+    return sorted(entries, key=lambda entry: (-entry["injections"], entry["original_date"], entry["record_id"]))
+
+
+def render_digest(entries: list[dict], *, days: int = 7) -> str:
+    if not entries:
+        return f"No earlier-session records were injected in the last {days} days."
+    lines = [f"You already solved this: {len(entries)} record(s) injected in the last {days} days", ""]
+    for entry in entries:
+        lines.append(
+            f"  {entry['original_date']}  {entry['title']}  "
+            f"(session {entry['source_session_id']}, injected {entry['injections']}x)"
+        )
+    return "\n".join(lines)
 
 
 def render_report(data: dict) -> str:
