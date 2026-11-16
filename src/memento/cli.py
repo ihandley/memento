@@ -18,7 +18,7 @@ from .deduplication import DEFAULT_SEMANTIC_DUPLICATE_THRESHOLD, reconcile_dupli
 from .extractors import create_extractor
 from .extractors.raw_knowledge import RawKnowledgeExtractor, raw_source_documents, raw_source_id
 from .extractors.base import EngineConfigurationError, ExtractionPendingRetry, KnowledgeExtractor, ProjectProvenance
-from .hook import format_context, handle_user_prompt
+from .hook import format_context, handle_user_prompt, purge_injections
 from .health import CursorHealthChecker, HealthChecker, deterministic_findings, grounded_findings, write_report
 from .markdown_kb import MarkdownKnowledgeBaseExtractor, markdown_articles, markdown_source_id
 from .overlay import (
@@ -42,7 +42,7 @@ from .evaluation import (
     spot_check_markdown,
     summarize,
 )
-from .report import generate_report, never_retrieved, render_report
+from .report import digest, generate_report, never_retrieved, render_digest, render_report
 from .retrieval import RetrievalScope
 from .retrieval import purge_traces
 from .retrieval import search as retrieval_search
@@ -341,6 +341,10 @@ def parser() -> argparse.ArgumentParser:
     report_cmd.add_argument("--artifacts", type=Path)
     report_cmd.add_argument("--json", action="store_true")
     report_cmd.add_argument("--never-retrieved-days", type=int, default=14)
+    digest_cmd = commands.add_parser("digest", help="Records injected in the last 7 days from earlier sessions")
+    digest_cmd.add_argument("--artifacts", type=Path)
+    digest_cmd.add_argument("--days", type=int, default=7)
+    digest_cmd.add_argument("--json", action="store_true")
     config_cmd = commands.add_parser("config")
     config_commands = config_cmd.add_subparsers(dest="config_command", required=True)
     config_commands.add_parser("show")
@@ -462,6 +466,7 @@ def _forget_sources(artifacts_root: Path, database: Path, source_ids: list[str],
         record_ids, active_revision_removed = forget_source(artifacts_root, source_id, project_id=project_id)
         forget_records(artifacts_root, record_ids)
         purge_traces(artifacts_root, set(record_ids))
+        purge_injections(artifacts_root, set(record_ids))
         if project_id is None or active_revision_removed:
             delete_by_source_id(database, source_id)
         total += len(record_ids)
@@ -1125,6 +1130,9 @@ def run(
         if args.never_retrieved_days != 14:
             data["never_retrieved"] = never_retrieved(artifacts, min_age_days=args.never_retrieved_days)
         print(json.dumps(data, indent=2) if args.json else render_report(data))
+    elif args.command == "digest":
+        entries = digest(artifacts, days=args.days)
+        print(json.dumps(entries, indent=2) if args.json else render_digest(entries, days=args.days))
     elif args.command == "forget":
         if bool(args.source_id) == bool(args.project):
             print("forget requires exactly one of <source-id> or --project", file=sys.stderr)
