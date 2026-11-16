@@ -4,14 +4,7 @@
     ".": {
       "release-type": "python",
       "package-name": "memento",
-      "include-component-in-tag": false,
-      "extra-files": [
-        {
-          "type": "toml",
-          "path": "uv.lock",
-          "jsonpath": "$.package[?(@.name=='memento')].version"
-        }
-      ]
+      "include-component-in-tag": false
     }
   }
 }
