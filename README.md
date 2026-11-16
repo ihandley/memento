@@ -22,6 +22,7 @@ locally.
 - [Concept map](#concept-map)
 - [Requirements](#requirements)
 - [1. Install Memento](#1-install-memento)
+  - [Update Memento](#update-memento)
 - [2. Configure Memento](#2-configure-memento)
 - [3. Put knowledge into Memento](#3-put-knowledge-into-memento)
   - [Import Claude sessions](#import-claude-sessions)
@@ -111,6 +112,44 @@ Then approve it once:
 ```sh
 direnv allow
 ```
+### Update Memento
+
+Releases are automatic. Every merge to `main` runs the tests, and
+[release-please](https://github.com/googleapis/release-please) keeps a release
+PR open that bumps the version and writes the changelog from
+[Conventional Commit](https://www.conventionalcommits.org/) messages (`fix:` is
+a patch, `feat:` is a minor, `feat!:` or a `BREAKING CHANGE:` footer is a
+major). Merging that PR tags the release and publishes it on GitHub.
+
+Nothing is pushed to your machine. Updating the running copy is one command.
+Because Memento is installed as an editable uv tool, pulling `main` is the
+update:
+
+```sh
+cd memento
+git pull --ff-only
+uv tool install --editable . --reinstall
+memento --help
+```
+
+The reinstall picks up new or changed dependencies. When only Memento's own
+code changed, `git pull` alone is enough.
+
+To run an exact release instead of `main`, check out its tag first:
+
+```sh
+git fetch --tags
+git checkout v1.1.0
+uv tool install --editable . --reinstall
+```
+
+Return to `main` with `git checkout main` and reinstall the same way.
+
+Nightly sync (`scripts/nightly-sync.sh`) calls the installed `memento`, so it
+uses the new version on its next run. Index and artifact formats are not
+migrated automatically; check the release notes on the
+[releases page](https://github.com/ihandley/memento/releases) before updating.
+
 ## 2. Configure Memento
 
 Create `~/.config/memento/config.toml`:
