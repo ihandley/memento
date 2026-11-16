@@ -197,19 +197,22 @@ def digest(artifacts_root: Path, *, days: int = 7, now: datetime | None = None) 
 
     now = now or datetime.now(timezone.utc)
     injections = _since(_read_jsonl(artifacts_root / INJECTIONS_LOG_NAME), "logged_at", now - timedelta(days=days))
-    counts: Counter[str] = Counter()
-    for injection in injections:
-        for record_id in set(injection.get("record_ids") or []):
-            counts[(record_id, injection.get("session_id"))] += 1
     per_record: Counter[str] = Counter()
     records: dict[str, dict | None] = {}
-    for (record_id, session_id), count in counts.items():
-        if record_id not in records:
-            records[record_id] = find_record(artifacts_root, record_id)
-        record = records[record_id]
-        if record is None or record.get("source_session_id") == session_id:
-            continue
-        per_record[record_id] += count
+    for injection in injections:
+        injected_at = _parse_timestamp(injection.get("logged_at"))
+        for record_id in set(injection.get("record_ids") or []):
+            if record_id not in records:
+                records[record_id] = find_record(artifacts_root, record_id)
+            record = records[record_id]
+            if record is None or record.get("source_session_id") == injection.get("session_id"):
+                continue
+            # Different AND earlier: a record dated after its injection can't
+            # be something already solved.
+            recorded_at = _parse_timestamp(record.get("timestamp"))
+            if recorded_at is not None and injected_at is not None and recorded_at > injected_at:
+                continue
+            per_record[record_id] += 1
     entries = [
         {
             "record_id": record_id,

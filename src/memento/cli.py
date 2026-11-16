@@ -18,7 +18,7 @@ from .deduplication import DEFAULT_SEMANTIC_DUPLICATE_THRESHOLD, reconcile_dupli
 from .extractors import create_extractor
 from .extractors.raw_knowledge import RawKnowledgeExtractor, raw_source_documents, raw_source_id
 from .extractors.base import EngineConfigurationError, ExtractionPendingRetry, KnowledgeExtractor, ProjectProvenance
-from .hook import format_context, handle_user_prompt
+from .hook import format_context, handle_user_prompt, purge_injections
 from .health import CursorHealthChecker, HealthChecker, deterministic_findings, grounded_findings, write_report
 from .markdown_kb import MarkdownKnowledgeBaseExtractor, markdown_articles, markdown_source_id
 from .overlay import (
@@ -466,6 +466,7 @@ def _forget_sources(artifacts_root: Path, database: Path, source_ids: list[str],
         record_ids, active_revision_removed = forget_source(artifacts_root, source_id, project_id=project_id)
         forget_records(artifacts_root, record_ids)
         purge_traces(artifacts_root, set(record_ids))
+        purge_injections(artifacts_root, set(record_ids))
         if project_id is None or active_revision_removed:
             delete_by_source_id(database, source_id)
         total += len(record_ids)

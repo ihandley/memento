@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 from collections.abc import Callable
@@ -193,6 +194,24 @@ def _record_injection_best_effort(artifacts_root: Path, *, session_id: str | Non
         )
     except Exception:
         pass
+
+
+def purge_injections(artifacts_root: Path, record_ids: set[str]) -> None:
+    """Scrub forgotten record ids from the injection log, part of forget's
+    erasure guarantee. Entries left with no ids are dropped."""
+
+    path = artifacts_root / INJECTIONS_LOG_NAME
+    if not record_ids or not path.exists():
+        return
+    kept = []
+    for line in path.read_text().splitlines():
+        if not line:
+            continue
+        entry = json.loads(line)
+        entry["record_ids"] = [i for i in entry.get("record_ids", []) if i not in record_ids]
+        if entry["record_ids"]:
+            kept.append(json.dumps(entry))
+    path.write_text("\n".join(kept) + ("\n" if kept else ""))
 
 
 def _record_metric_best_effort(

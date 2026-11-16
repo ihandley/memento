@@ -101,3 +101,26 @@ def test_hook_survives_injection_log_write_failure(tmp_path, monkeypatch):
         embedder=object(),
     )
     assert "additionalContext" in response["hookSpecificOutput"]
+
+
+def test_digest_excludes_records_from_a_later_session_than_the_injection(tmp_path):
+    record = _activate(tmp_path, timestamp="2026-11-16T00:00:00Z")
+    _inject(tmp_path, [record["id"]], days_ago=3)
+    assert digest(tmp_path, now=NOW) == []
+
+
+def test_purge_injections_removes_forgotten_ids_only(tmp_path):
+    from memento.hook import purge_injections
+
+    _inject(tmp_path, ["gone", "kept"])
+    _inject(tmp_path, ["gone"])
+    purge_injections(tmp_path, {"gone"})
+    entries = [json.loads(line) for line in (tmp_path / INJECTIONS_LOG_NAME).read_text().splitlines()]
+    assert [entry["record_ids"] for entry in entries] == [["kept"]]
+
+
+def test_purge_injections_without_a_log_is_a_noop(tmp_path):
+    from memento.hook import purge_injections
+
+    purge_injections(tmp_path, {"gone"})
+    assert not (tmp_path / INJECTIONS_LOG_NAME).exists()
